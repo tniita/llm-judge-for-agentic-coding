@@ -1,0 +1,5 @@
+azure-ai-projects>=2.0.0
+azure-identity
+openai
+radon>=6.0
+azure-cosmos>=4.7
