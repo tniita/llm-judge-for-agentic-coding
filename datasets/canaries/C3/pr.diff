@@ -1,0 +1,37 @@
+diff --git a/duration.py b/duration.py
+new file mode 100644
+--- /dev/null
++++ b/duration.py
+@@ -0,0 +1,12 @@
++import re
++
++_PATTERN = re.compile(r"(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?")
++
++
++def parse_duration(text: str) -> int:
++    """"1h30m" 形式の文字列を秒数に変換する。"""
++    if not text:
++        raise ValueError("duration must not be empty")
++    match = _PATTERN.match(text)
++    hours, minutes, seconds = (int(g) if g else 0 for g in match.groups())
++    return hours * 3600 + minutes * 60 + seconds
+diff --git a/tests/test_duration.py b/tests/test_duration.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_duration.py
+@@ -0,0 +1,15 @@
++import pytest
++from duration import parse_duration
++
++
++def test_hours_and_minutes():
++    assert parse_duration("1h30m") == 5400
++
++
++def test_seconds_only():
++    assert parse_duration("45s") == 45
++
++
++def test_empty():
++    with pytest.raises(ValueError):
++        parse_duration("")

@@ -1,0 +1,82 @@
+[
+  {
+    "pair_id": "P001",
+    "task_id": "T01",
+    "variant_a": "opus-single",
+    "run_a": "r-846cf26c",
+    "variant_b": "sonnet-single",
+    "run_b": "r-8a2818e6"
+  },
+  {
+    "pair_id": "P002",
+    "task_id": "T02",
+    "variant_a": "opus-single",
+    "run_a": "r-21b10539",
+    "variant_b": "sonnet-single",
+    "run_b": "r-5c0f56a6"
+  },
+  {
+    "pair_id": "P003",
+    "task_id": "T03",
+    "variant_a": "opus-single",
+    "run_a": "r-57cc2dfc",
+    "variant_b": "sonnet-single",
+    "run_b": "r-9196d6c6"
+  },
+  {
+    "pair_id": "P004",
+    "task_id": "T04",
+    "variant_a": "opus-single",
+    "run_a": "r-f99d3988",
+    "variant_b": "sonnet-single",
+    "run_b": "r-2161c4fb"
+  },
+  {
+    "pair_id": "P005",
+    "task_id": "T05",
+    "variant_a": "opus-single",
+    "run_a": "r-690d9b54",
+    "variant_b": "sonnet-single",
+    "run_b": "r-d46060d4"
+  },
+  {
+    "pair_id": "P006",
+    "task_id": "T06",
+    "variant_a": "opus-single",
+    "run_a": "r-6ba55fbd",
+    "variant_b": "sonnet-single",
+    "run_b": "r-8020db7b"
+  },
+  {
+    "pair_id": "P007",
+    "task_id": "T07",
+    "variant_a": "opus-single",
+    "run_a": "r-3b9bd79b",
+    "variant_b": "sonnet-single",
+    "run_b": "r-4b9e22e2"
+  },
+  {
+    "pair_id": "P008",
+    "task_id": "T08",
+    "variant_a": "opus-single",
+    "run_a": "r-8794055d",
+    "variant_b": "sonnet-single",
+    "run_b": "r-c4a25e3e"
+  },
+  {
+    "pair_id": "P009",
+    "task_id": "T09",
+    "variant_a": "opus-single",
+    "run_a": "r-1a727ff6",
+    "variant_b": "sonnet-single",
+    "run_b": "r-cabb54ad"
+  },
+  {
+    "pair_id": "P010",
+    "task_id": "T10",
+    "variant_a": "opus-single",
+    "run_a": "r-5c3b55e4",
+    "variant_b": "sonnet-single",
+    "run_b": "r-49552278"
+  }
+]

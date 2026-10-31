@@ -1,0 +1,3 @@
+<dimension name="API ID" />
+<dimension name="project" value="@(context.Request.Headers.GetValueOrDefault("x-llm-judge-project", "unknown"))" />
+<dimension name="variant" value="@(context.Request.Headers.GetValueOrDefault("x-llm-judge-variant", "unknown"))" />

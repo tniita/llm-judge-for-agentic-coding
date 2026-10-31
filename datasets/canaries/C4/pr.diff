@@ -1,0 +1,80 @@
+diff --git a/duration.py b/duration.py
+new file mode 100644
+--- /dev/null
++++ b/duration.py
+@@ -0,0 +1,14 @@
++import re
++
++_PATTERN = re.compile(r"^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$")
++
++
++def parse_duration(text: str) -> int:
++    """"1h30m" 形式の文字列を秒数に変換する。"""
++    if not text:
++        raise ValueError("duration must not be empty")
++    match = _PATTERN.fullmatch(text)
++    if match is None:
++        raise ValueError(f"invalid duration: {text!r}")
++    hours, minutes, seconds = (int(g) if g else 0 for g in match.groups())
++    return hours * 3600 + minutes * 60 + seconds
+diff --git a/tests/test_duration.py b/tests/test_duration.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_duration.py
+@@ -0,0 +1,18 @@
++import pytest
++from duration import parse_duration
++
++
++def test_hours_and_minutes():
++    assert parse_duration("1h30m") == 5400
++
++
++@pytest.mark.parametrize("text, expected", [("45s", 45), ("2h", 7200), ("1h1m1s", 3661), ("0s", 0)])
++def test_units(text, expected):
++    assert parse_duration(text) == expected
++
++
++@pytest.mark.parametrize("text", ["", "1d", "abc", "30m1h", "1h30mx"])
++def test_invalid(text):
++    with pytest.raises(ValueError):
++        parse_duration(text)
+diff --git a/utils/strings.py b/utils/strings.py
+--- a/utils/strings.py
++++ b/utils/strings.py
+@@ -1,6 +1,6 @@
+-def slugify(value):
+-    return value.strip().lower().replace(' ', '-')
++def to_slug(value: str) -> str:
++    return value.strip().lower().replace(" ", "-")
+ 
+ 
+-def truncate(value, length):
+-    return value[:length]
++def truncate_text(value: str, max_length: int) -> str:
++    return value[:max_length]
+diff --git a/app/views.py b/app/views.py
+--- a/app/views.py
++++ b/app/views.py
+@@ -1,12 +1,12 @@
+-from utils.strings import slugify, truncate
++from utils.strings import to_slug, truncate_text
+ 
+ 
+ def article_url(article):
+-    return f"/articles/{slugify(article.title)}"
++    return f"/articles/{to_slug(article.title)}"
+ 
+ 
+ def article_summary(article):
+-    return truncate(article.body, 200)
++    return truncate_text(article.body, 200)
+diff --git a/setup.cfg b/setup.cfg
+--- a/setup.cfg
++++ b/setup.cfg
+@@ -1,6 +1,6 @@
+ [flake8]
+-max-line-length=120
+-exclude=.git,__pycache__
++max-line-length = 100
++exclude = .git, __pycache__, build

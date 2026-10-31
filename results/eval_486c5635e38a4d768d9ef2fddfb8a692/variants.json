@@ -1,0 +1,146 @@
+{
+  "variants": {
+    "opus-single": {
+      "attempts": 10,
+      "hard_gate_pass_rate": 1.0,
+      "judged_runs": 10,
+      "mean_total": 94.0952380952381,
+      "mean_req_met_rate": 0.9828571428571429,
+      "mean_scores": {
+        "requirements": 4.8,
+        "test_quality": 4.9,
+        "design": 5.0,
+        "maintainability": 4.8,
+        "change_scope": 4.7,
+        "robustness": 4.2,
+        "explanation": 4.6
+      },
+      "critical_rate": 0.0,
+      "mean_tokens_in": 116149.9,
+      "mean_tokens_out": 10667.0,
+      "mean_cost_usd": 0.30520234,
+      "mean_duration_sec": 145.3023,
+      "mean_metrics_delta": {
+        "complexity_total": null,
+        "duplicated_lines": null,
+        "duplication_rate": null,
+        "coupling_edges": null,
+        "mean_instability": null,
+        "propagation_cost": null,
+        "modularity": null
+      }
+    },
+    "sonnet-single": {
+      "attempts": 10,
+      "hard_gate_pass_rate": 1.0,
+      "judged_runs": 10,
+      "mean_total": 92.0,
+      "mean_req_met_rate": 0.9828571428571429,
+      "mean_scores": {
+        "requirements": 4.8,
+        "test_quality": 4.1,
+        "design": 5.0,
+        "maintainability": 4.8,
+        "change_scope": 4.7,
+        "robustness": 4.4,
+        "explanation": 4.8
+      },
+      "critical_rate": 0.0,
+      "mean_tokens_in": 50543.0,
+      "mean_tokens_out": 6357.9,
+      "mean_cost_usd": 0.09142266,
+      "mean_duration_sec": 63.8023,
+      "mean_metrics_delta": {
+        "complexity_total": null,
+        "duplicated_lines": null,
+        "duplication_rate": null,
+        "coupling_edges": null,
+        "mean_instability": null,
+        "propagation_cost": null,
+        "modularity": null
+      }
+    }
+  },
+  "comparisons": [
+    {
+      "a": "opus-single",
+      "b": "sonnet-single",
+      "wins_a": 7,
+      "wins_b": 1,
+      "ties": 2,
+      "p_value_sign_test": 0.0703125,
+      "mean_total_diff": 2.095238095238095,
+      "tasks": [
+        {
+          "task_id": "T01",
+          "outcome": "a",
+          "total_a": 96.19047619047619,
+          "total_b": 88.57142857142857
+        },
+        {
+          "task_id": "T02",
+          "outcome": "tie",
+          "total_a": 100.0,
+          "total_b": 100.0
+        },
+        {
+          "task_id": "T03",
+          "outcome": "a",
+          "total_a": 96.19047619047619,
+          "total_b": 94.28571428571428
+        },
+        {
+          "task_id": "T04",
+          "outcome": "a",
+          "total_a": 92.38095238095238,
+          "total_b": 88.57142857142857
+        },
+        {
+          "task_id": "T05",
+          "outcome": "a",
+          "total_a": 88.57142857142857,
+          "total_b": 86.66666666666667
+        },
+        {
+          "task_id": "T06",
+          "outcome": "a",
+          "total_a": 98.09523809523809,
+          "total_b": 96.19047619047619
+        },
+        {
+          "task_id": "T07",
+          "outcome": "b",
+          "total_a": 79.04761904761905,
+          "total_b": 82.85714285714286
+        },
+        {
+          "task_id": "T08",
+          "outcome": "a",
+          "total_a": 100.0,
+          "total_b": 96.19047619047619
+        },
+        {
+          "task_id": "T09",
+          "outcome": "tie",
+          "total_a": 90.47619047619048,
+          "total_b": 90.47619047619048
+        },
+        {
+          "task_id": "T10",
+          "outcome": "a",
+          "total_a": 100.0,
+          "total_b": 96.19047619047619
+        }
+      ]
+    }
+  ],
+  "weights": {
+    "requirements": 3,
+    "test_quality": 2,
+    "robustness": 2,
+    "design": 1,
+    "maintainability": 1,
+    "change_scope": 1,
+    "explanation": 0.5
+  }
+}

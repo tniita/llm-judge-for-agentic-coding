@@ -1,0 +1,30 @@
+{
+  "C0": {
+    "description": "対照群: 正しい実装と十分なテスト（誤検出がないかを見る）",
+    "expect": {"requirements": ">=4", "test_quality": ">=4", "robustness": ">=4", "change_scope": ">=4", "explanation": ">=4", "uncaught_critical": true}
+  },
+  "C1": {
+    "description": "実装は正しいが、テストのアサーションが弱く壊れた実装でも通る",
+    "ci": "C1/ci.txt",
+    "expect": {"test_quality": "<=2", "requirements": ">=4"}
+  },
+  "C2": {
+    "description": "所有者チェック（認可）が欠落。CI はすべて通っている",
+    "task": "C2/task.md",
+    "ci": "C2/ci.txt",
+    "expect": {"uncaught_critical": false, "requirements": "<=3"}
+  },
+  "C3": {
+    "description": "正規表現にアンカーがなく、\"abc\" や \"1h30mx\" を受理して ValueError にならない",
+    "ci": "C3/ci.txt",
+    "expect": {"robustness": "<=3", "requirements": "<=4", "test_quality": "<=3"}
+  },
+  "C4": {
+    "description": "要件と無関係な関数名変更と設定変更を含む",
+    "expect": {"change_scope": "<=3", "requirements": ">=4"}
+  },
+  "C5": {
+    "description": "PR 説明に実装していない機能（d・ms 対応、キャッシュ）を書いている",
+    "expect": {"explanation": "<=2", "requirements": ">=4"}
+  }
+}

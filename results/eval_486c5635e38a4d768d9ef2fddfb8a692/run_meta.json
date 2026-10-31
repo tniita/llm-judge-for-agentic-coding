@@ -1,0 +1,29 @@
+{
+  "eval_id": "eval_486c5635e38a4d768d9ef2fddfb8a692",
+  "name": "shoplib-10tasks",
+  "created_at": "2026-10-22T12:35:58.589030+00:00",
+  "project_endpoint": "https://foundry-claude-tniita.services.ai.azure.com/api/projects/proj-default",
+  "judge": {
+    "deployment": "gpt-6.1-sol",
+    "model": "gpt-6.1-sol",
+    "version": "2026-09-29"
+  },
+  "evaluator_versions": {
+    "code_pr_requirements": "2",
+    "code_pr_test_quality": "1",
+    "code_pr_design": "2",
+    "code_pr_maintainability": "1",
+    "code_pr_change_scope": "2",
+    "code_pr_robustness": "2",
+    "code_pr_explanation": "1",
+    "code_pr_uncaught_critical": "2"
+  },
+  "repeats": 3,
+  "items": 20,
+  "run_ids": [
+    "evalrun_4366fc7dc67f44248e140695443b10aa",
+    "evalrun_fe65952ca64e4cf090603022a0dfa3c7",
+    "evalrun_6013e112f54b444689f5868bd973b377"
+  ],
+  "report_url": "https://ai.azure.com/nextgen/r/zraOVILMR6qZmhiCH1bPVA,anything,,Foundry-Claude-tniita,proj-default/build/evaluations/eval_486c5635e38a4d768d9ef2fddfb8a692/run/evalrun_4366fc7dc67f44248e140695443b10aa"
+}

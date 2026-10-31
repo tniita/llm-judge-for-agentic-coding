@@ -1,0 +1,6 @@
+{"run_id": "C0", "task_id": "C0", "variant": "canary-set", "attempt": 1, "hard_gate": "pass"}
+{"run_id": "C1", "task_id": "C1", "variant": "canary-set", "attempt": 1, "hard_gate": "pass"}
+{"run_id": "C2", "task_id": "C2", "variant": "canary-set", "attempt": 1, "hard_gate": "pass"}
+{"run_id": "C3", "task_id": "C3", "variant": "canary-set", "attempt": 1, "hard_gate": "pass"}
+{"run_id": "C4", "task_id": "C4", "variant": "canary-set", "attempt": 1, "hard_gate": "pass"}
+{"run_id": "C5", "task_id": "C5", "variant": "canary-set", "attempt": 1, "hard_gate": "pass"}

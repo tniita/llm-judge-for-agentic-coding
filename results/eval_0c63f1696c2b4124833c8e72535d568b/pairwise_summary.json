@@ -1,0 +1,136 @@
+{
+  "pairs": [
+    {
+      "pair_id": "P001",
+      "task_id": "T01",
+      "variant_a": "opus-single",
+      "run_a": "r-846cf26c",
+      "variant_b": "sonnet-single",
+      "run_b": "r-8a2818e6",
+      "pref_order1": 0.0,
+      "pref_order2": -0.5,
+      "pref": -0.25,
+      "position_inconsistent": false
+    },
+    {
+      "pair_id": "P002",
+      "task_id": "T02",
+      "variant_a": "opus-single",
+      "run_a": "r-21b10539",
+      "variant_b": "sonnet-single",
+      "run_b": "r-5c0f56a6",
+      "pref_order1": 0.5,
+      "pref_order2": 0.5,
+      "pref": 0.5,
+      "position_inconsistent": false
+    },
+    {
+      "pair_id": "P003",
+      "task_id": "T03",
+      "variant_a": "opus-single",
+      "run_a": "r-57cc2dfc",
+      "variant_b": "sonnet-single",
+      "run_b": "r-9196d6c6",
+      "pref_order1": 0.5,
+      "pref_order2": 0.5,
+      "pref": 0.5,
+      "position_inconsistent": false
+    },
+    {
+      "pair_id": "P004",
+      "task_id": "T04",
+      "variant_a": "opus-single",
+      "run_a": "r-f99d3988",
+      "variant_b": "sonnet-single",
+      "run_b": "r-2161c4fb",
+      "pref_order1": 0.5,
+      "pref_order2": 0.5,
+      "pref": 0.5,
+      "position_inconsistent": false
+    },
+    {
+      "pair_id": "P005",
+      "task_id": "T05",
+      "variant_a": "opus-single",
+      "run_a": "r-690d9b54",
+      "variant_b": "sonnet-single",
+      "run_b": "r-d46060d4",
+      "pref_order1": 0.5,
+      "pref_order2": 0.5,
+      "pref": 0.5,
+      "position_inconsistent": false
+    },
+    {
+      "pair_id": "P006",
+      "task_id": "T06",
+      "variant_a": "opus-single",
+      "run_a": "r-6ba55fbd",
+      "variant_b": "sonnet-single",
+      "run_b": "r-8020db7b",
+      "pref_order1": 0.5,
+      "pref_order2": 0.5,
+      "pref": 0.5,
+      "position_inconsistent": false
+    },
+    {
+      "pair_id": "P007",
+      "task_id": "T07",
+      "variant_a": "opus-single",
+      "run_a": "r-3b9bd79b",
+      "variant_b": "sonnet-single",
+      "run_b": "r-4b9e22e2",
+      "pref_order1": 0.5,
+      "pref_order2": 0.5,
+      "pref": 0.5,
+      "position_inconsistent": false
+    },
+    {
+      "pair_id": "P008",
+      "task_id": "T08",
+      "variant_a": "opus-single",
+      "run_a": "r-8794055d",
+      "variant_b": "sonnet-single",
+      "run_b": "r-c4a25e3e",
+      "pref_order1": 0.5,
+      "pref_order2": 0.5,
+      "pref": 0.5,
+      "position_inconsistent": false
+    },
+    {
+      "pair_id": "P009",
+      "task_id": "T09",
+      "variant_a": "opus-single",
+      "run_a": "r-1a727ff6",
+      "variant_b": "sonnet-single",
+      "run_b": "r-cabb54ad",
+      "pref_order1": 0.5,
+      "pref_order2": 0.0,
+      "pref": 0.25,
+      "position_inconsistent": false
+    },
+    {
+      "pair_id": "P010",
+      "task_id": "T10",
+      "variant_a": "opus-single",
+      "run_a": "r-5c3b55e4",
+      "variant_b": "sonnet-single",
+      "run_b": "r-49552278",
+      "pref_order1": 0.5,
+      "pref_order2": 0.5,
+      "pref": 0.5,
+      "position_inconsistent": false
+    }
+  ],
+  "comparisons": [
+    {
+      "a": "opus-single",
+      "b": "sonnet-single",
+      "wins_a": 9,
+      "wins_b": 1,
+      "ties": 0,
+      "mean_pref_a": 0.4,
+      "p_value_sign_test": 0.021484375
+    }
+  ],
+  "position_bias": 0.05
+}

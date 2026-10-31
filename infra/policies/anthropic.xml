@@ -1,0 +1,21 @@
+<policies>
+  <inbound>
+    <base />
+    <authentication-managed-identity resource="https://cognitiveservices.azure.com" />
+    <set-header name="x-api-key" exists-action="delete" />
+    <!-- 応答本文をポリシーで読まない（ストリーミング応答をバッファリングしない）。
+         llm-emit-token-metric は Anthropic Messages API の usage からストリーミングでも計測する（v2 レベル） -->
+    <llm-emit-token-metric namespace="__NAMESPACE__">
+      __DIMENSIONS__
+    </llm-emit-token-metric>
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>

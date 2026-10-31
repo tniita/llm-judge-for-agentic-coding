@@ -1,0 +1,308 @@
+[
+  {
+    "run_id": "r-8a2818e6",
+    "task_id": "T01",
+    "variant": "sonnet-single",
+    "attempt": 1,
+    "hard_gate": "pass",
+    "visible": "15 passed in 0.02s",
+    "hidden": "9 passed in 0.02s",
+    "lint": 0,
+    "cost_usd": 0.0748917,
+    "turns": 7,
+    "denials": 1,
+    "agent_error": null,
+    "make_row": [
+      "r-8a2818e6: 追加しました（差分 4,273 文字）"
+    ]
+  },
+  {
+    "run_id": "r-846cf26c",
+    "task_id": "T01",
+    "variant": "opus-single",
+    "attempt": 1,
+    "hard_gate": "pass",
+    "visible": "33 passed in 0.02s",
+    "hidden": "9 passed in 0.01s",
+    "lint": 0,
+    "cost_usd": 0.2499912,
+    "turns": 9,
+    "denials": 3,
+    "agent_error": null,
+    "make_row": [
+      "r-846cf26c: 追加しました（差分 6,601 文字）"
+    ]
+  },
+  {
+    "run_id": "r-9196d6c6",
+    "task_id": "T03",
+    "variant": "sonnet-single",
+    "attempt": 1,
+    "hard_gate": "pass",
+    "visible": "11 passed in 0.02s",
+    "hidden": "5 passed in 0.02s",
+    "lint": 0,
+    "cost_usd": 0.13468360000000001,
+    "turns": 17,
+    "denials": 5,
+    "agent_error": null,
+    "make_row": [
+      "r-9196d6c6: 追加しました（差分 8,284 文字）"
+    ]
+  },
+  {
+    "run_id": "r-57cc2dfc",
+    "task_id": "T03",
+    "variant": "opus-single",
+    "attempt": 1,
+    "hard_gate": "pass",
+    "visible": "20 passed in 1.99s",
+    "hidden": "5 passed in 0.03s",
+    "lint": 0,
+    "cost_usd": 0.6136448000000002,
+    "turns": 30,
+    "denials": 8,
+    "agent_error": null,
+    "make_row": [
+      "r-57cc2dfc: 追加しました（差分 10,563 文字）"
+    ]
+  },
+  {
+    "run_id": "r-2161c4fb",
+    "task_id": "T04",
+    "variant": "sonnet-single",
+    "attempt": 1,
+    "hard_gate": "pass",
+    "visible": "9 passed in 0.01s",
+    "hidden": "6 passed in 0.02s",
+    "lint": 0,
+    "cost_usd": 0.08680829999999999,
+    "turns": 11,
+    "denials": 3,
+    "agent_error": null,
+    "make_row": [
+      "r-2161c4fb: 追加しました（差分 5,101 文字）"
+    ]
+  },
+  {
+    "run_id": "r-f99d3988",
+    "task_id": "T04",
+    "variant": "opus-single",
+    "attempt": 1,
+    "hard_gate": "pass",
+    "visible": "13 passed in 0.02s",
+    "hidden": "6 passed in 0.02s",
+    "lint": 0,
+    "cost_usd": 0.2554078,
+    "turns": 13,
+    "denials": 4,
+    "agent_error": null,
+    "make_row": [
+      "r-f99d3988: 追加しました（差分 6,351 文字）"
+    ]
+  },
+  {
+    "run_id": "r-d46060d4",
+    "task_id": "T05",
+    "variant": "sonnet-single",
+    "attempt": 1,
+    "hard_gate": "pass",
+    "visible": "20 passed in 0.02s",
+    "hidden": "11 passed in 0.02s",
+    "lint": 0,
+    "cost_usd": 0.055207700000000005,
+    "turns": 6,
+    "denials": 1,
+    "agent_error": null,
+    "make_row": [
+      "r-d46060d4: 追加しました（差分 2,587 文字）"
+    ]
+  },
+  {
+    "run_id": "r-690d9b54",
+    "task_id": "T05",
+    "variant": "opus-single",
+    "attempt": 1,
+    "hard_gate": "pass",
+    "visible": "46 passed in 0.03s",
+    "hidden": "11 passed in 0.02s",
+    "lint": 0,
+    "cost_usd": 0.2495056,
+    "turns": 13,
+    "denials": 3,
+    "agent_error": null,
+    "make_row": [
+      "r-690d9b54: 追加しました（差分 5,414 文字）"
+    ]
+  },
+  {
+    "run_id": "r-8020db7b",
+    "task_id": "T06",
+    "variant": "sonnet-single",
+    "attempt": 1,
+    "hard_gate": "pass",
+    "visible": "14 passed in 0.01s",
+    "hidden": "7 passed in 0.02s",
+    "lint": 0,
+    "cost_usd": 0.0694273,
+    "turns": 8,
+    "denials": 1,
+    "agent_error": null,
+    "make_row": [
+      "r-8020db7b: 追加しました（差分 4,369 文字）"
+    ]
+  },
+  {
+    "run_id": "r-6ba55fbd",
+    "task_id": "T06",
+    "variant": "opus-single",
+    "attempt": 1,
+    "hard_gate": "pass",
+    "visible": "30 passed in 0.02s",
+    "hidden": "7 passed in 0.02s",
+    "lint": 0,
+    "cost_usd": 0.2614218,
+    "turns": 19,
+    "denials": 5,
+    "agent_error": null,
+    "make_row": [
+      "r-6ba55fbd: 追加しました（差分 9,703 文字）"
+    ]
+  },
+  {
+    "run_id": "r-4b9e22e2",
+    "task_id": "T07",
+    "variant": "sonnet-single",
+    "attempt": 1,
+    "hard_gate": "pass",
+    "visible": "21 passed in 0.02s",
+    "hidden": "4 passed in 0.01s",
+    "lint": 0,
+    "cost_usd": 0.2157775,
+    "turns": 11,
+    "denials": 6,
+    "agent_error": null,
+    "make_row": [
+      "r-4b9e22e2: 追加しました（差分 5,928 文字）"
+    ]
+  },
+  {
+    "run_id": "r-3b9bd79b",
+    "task_id": "T07",
+    "variant": "opus-single",
+    "attempt": 1,
+    "hard_gate": "pass",
+    "visible": "39 passed in 0.02s",
+    "hidden": "4 passed in 0.01s",
+    "lint": 0,
+    "cost_usd": 0.45124319999999996,
+    "turns": 11,
+    "denials": 4,
+    "agent_error": null,
+    "make_row": [
+      "r-3b9bd79b: 追加しました（差分 10,129 文字）"
+    ]
+  },
+  {
+    "run_id": "r-c4a25e3e",
+    "task_id": "T08",
+    "variant": "sonnet-single",
+    "attempt": 1,
+    "hard_gate": "pass",
+    "visible": "14 passed in 0.01s",
+    "hidden": "7 passed in 0.01s",
+    "lint": 0,
+    "cost_usd": 0.06848510000000001,
+    "turns": 7,
+    "denials": 1,
+    "agent_error": null,
+    "make_row": [
+      "r-c4a25e3e: 追加しました（差分 3,411 文字）"
+    ]
+  },
+  {
+    "run_id": "r-8794055d",
+    "task_id": "T08",
+    "variant": "opus-single",
+    "attempt": 1,
+    "hard_gate": "pass",
+    "visible": "23 passed in 0.02s",
+    "hidden": "7 passed in 0.02s",
+    "lint": 0,
+    "cost_usd": 0.2592152,
+    "turns": 14,
+    "denials": 3,
+    "agent_error": null,
+    "make_row": [
+      "r-8794055d: 追加しました（差分 5,496 文字）"
+    ]
+  },
+  {
+    "run_id": "r-cabb54ad",
+    "task_id": "T09",
+    "variant": "sonnet-single",
+    "attempt": 1,
+    "hard_gate": "pass",
+    "visible": "15 passed in 0.02s",
+    "hidden": "7 passed in 0.02s",
+    "lint": 0,
+    "cost_usd": 0.04050730000000001,
+    "turns": 3,
+    "denials": 0,
+    "agent_error": null,
+    "make_row": [
+      "r-cabb54ad: 追加しました（差分 3,961 文字）"
+    ]
+  },
+  {
+    "run_id": "r-1a727ff6",
+    "task_id": "T09",
+    "variant": "opus-single",
+    "attempt": 1,
+    "hard_gate": "pass",
+    "visible": "26 passed in 0.03s",
+    "hidden": "7 passed in 0.02s",
+    "lint": 0,
+    "cost_usd": 0.2999434,
+    "turns": 15,
+    "denials": 3,
+    "agent_error": null,
+    "make_row": [
+      "r-1a727ff6: 追加しました（差分 8,157 文字）"
+    ]
+  },
+  {
+    "run_id": "r-49552278",
+    "task_id": "T10",
+    "variant": "sonnet-single",
+    "attempt": 1,
+    "hard_gate": "pass",
+    "visible": "8 passed in 0.01s",
+    "hidden": "5 passed in 0.01s",
+    "lint": 0,
+    "cost_usd": 0.0853938,
+    "turns": 12,
+    "denials": 1,
+    "agent_error": null,
+    "make_row": [
+      "r-49552278: 追加しました（差分 5,104 文字）"
+    ]
+  },
+  {
+    "run_id": "r-5c3b55e4",
+    "task_id": "T10",
+    "variant": "opus-single",
+    "attempt": 1,
+    "hard_gate": "pass",
+    "visible": "17 passed in 0.02s",
+    "hidden": "5 passed in 0.02s",
+    "lint": 0,
+    "cost_usd": 0.25136800000000004,
+    "turns": 19,
+    "denials": 4,
+    "agent_error": null,
+    "make_row": [
+      "r-5c3b55e4: 追加しました（差分 9,105 文字）"
+    ]
+  }
+]

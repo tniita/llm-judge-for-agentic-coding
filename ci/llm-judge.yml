@@ -1,0 +1,169 @@
+# LLM Judge を GitHub Actions から実行するワークフローのテンプレート。
+# 評価対象のリポジトリにこのキット一式を tools/llm-judge/ として置き、本ファイルを .github/workflows/ にコピーして使う。
+#
+# 前提:
+# - エージェントの実行基盤が、CI 完了後にこのワークフローを inputs 付きで起動する
+# - 対象リポジトリの CI ワークフローが Build・Test（Hidden test を含む）・Lint・CodeQL を実行し、
+#   結果の要約を ci-summary という名前の成果物（ci.txt）としてアップロードする。CI の結論（success か否か）が Hard Gate になる
+# - プロジェクトの Skill（tools/llm-judge/project_skills/ のテンプレートを元に作る）をリポジトリに置き、skills_dir で指定する。
+#   評価対象のエージェントにも同じ Skill を渡しておく
+# - 結果を可視化基盤（infra/main.bicep）に送る場合は、リポジトリ変数 LLM_JUDGE_PROJECT / LLM_JUDGE_COSMOS_ENDPOINT と
+#   シークレット APPLICATIONINSIGHTS_CONNECTION_STRING を設定する。未設定なら送信しない
+# - OIDC 用のアプリ登録（フェデレーション資格情報）を作り、Foundry プロジェクトに Azure AI User ロールを付与する
+#   シークレット: AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID
+name: llm-judge
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id: { description: "推測できない Run ID（モデル名や方式名を含めない）", required: true }
+      task_id: { required: true }
+      variant: { description: "方式名（対応表にのみ記録。Judge には渡さない）", required: true }
+      attempt: { default: "1" }
+      task_file: { description: "要件と完了条件のファイル（R1, R2 ... の ID 付き）", required: true }
+      base: { description: "比較元のコミット SHA または origin/<branch>", required: true }
+      head: { description: "エージェントの変更を含むコミット SHA または origin/<branch>", required: true }
+      pr_number: { required: true }
+      ci_run_id: { description: "評価対象の CI ワークフローの run ID", required: true }
+      skills_dir: { description: "プロジェクトの Skill のディレクトリ（空なら渡さない）", default: "" }
+      tokens_in: { default: "" }
+      tokens_out: { default: "" }
+      cost_usd: { default: "" }
+      duration_sec: { default: "" }
+
+permissions:
+  id-token: write
+  contents: read
+  actions: read
+  pull-requests: read
+
+jobs:
+  judge:
+    runs-on: ubuntu-latest
+    # inputs はシェルに直接埋め込まず環境変数経由で渡す（スクリプトインジェクション対策）
+    env:
+      GH_TOKEN: ${{ github.token }}
+      KIT: tools/llm-judge
+      RUN_ID: ${{ inputs.run_id }}
+      TASK_ID: ${{ inputs.task_id }}
+      VARIANT: ${{ inputs.variant }}
+      ATTEMPT: ${{ inputs.attempt }}
+      TASK_FILE: ${{ inputs.task_file }}
+      BASE: ${{ inputs.base }}
+      HEAD: ${{ inputs.head }}
+      PR_NUMBER: ${{ inputs.pr_number }}
+      CI_RUN_ID: ${{ inputs.ci_run_id }}
+      SKILLS_DIR: ${{ inputs.skills_dir }}
+      TOKENS_IN: ${{ inputs.tokens_in }}
+      TOKENS_OUT: ${{ inputs.tokens_out }}
+      COST_USD: ${{ inputs.cost_usd }}
+      DURATION_SEC: ${{ inputs.duration_sec }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: CI の結果を取得（Hard Gate の判定と要約）
+        run: |
+          conclusion=$(gh run view "$CI_RUN_ID" --json conclusion -q .conclusion)
+          echo "HARD_GATE=$([ "$conclusion" = success ] && echo pass || echo fail)" >> "$GITHUB_ENV"
+          mkdir -p ci-summary
+          gh run download "$CI_RUN_ID" -n ci-summary -D ci-summary || echo "CI の要約が見つかりません" > ci-summary/ci.txt
+          gh pr view "$PR_NUMBER" --json body -q .body > pr.md
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r "$KIT/requirements.txt"
+
+      - name: PR の比較コミットを固定
+        run: |
+          head_sha=$(git rev-parse "${HEAD}^{commit}")
+          echo "HEAD=$head_sha" >> "$GITHUB_ENV"
+          # 共通祖先がない（関連のない履歴など）場合も止めず、指標は計測不能として記録する
+          if base_sha=$(git merge-base "$BASE" "$head_sha"); then
+            echo "BASE=$base_sha" >> "$GITHUB_ENV"
+            echo "BASE_SHA=$base_sha" >> "$GITHUB_ENV"
+          else
+            echo "METRICS_ERROR=$BASE と $head_sha に共通祖先がありません" >> "$GITHUB_ENV"
+          fi
+
+      # ベースコミットの解析結果（ファイル単位）を再利用し、今回変更されたファイルだけを再計算する
+      - uses: actions/cache@v4
+        if: env.BASE_SHA != ''
+        with:
+          path: .metrics-cache
+          key: llm-judge-metrics-${{ env.BASE_SHA }}-${{ env.HEAD }}
+          restore-keys: |
+            llm-judge-metrics-${{ env.BASE_SHA }}-
+            llm-judge-metrics-
+
+      - name: 機械的な品質指標を計算（共通祖先との差分）
+        if: env.METRICS_ERROR == ''
+        run: |
+          # 失敗しても Judge と Hard Gate 不合格の記録は止めない（計測不能として人間レビューに回す）
+          mkdir -p out
+          if ! python "$KIT/scripts/metrics.py" --repo . --base "$BASE_SHA" --head "$HEAD" \
+              --exclude "$KIT/*" --cache-dir .metrics-cache --prune-cache --out out/metrics.json 2> out/metrics.err; then
+            echo "METRICS_ERROR=metrics.py が失敗: $(tail -n 1 out/metrics.err | tr -d '\r')" >> "$GITHUB_ENV"
+          fi
+
+      - name: 評価データを作る
+        run: |
+          extra=()
+          [ -n "$TOKENS_IN" ] && extra+=(--tokens-in "$TOKENS_IN")
+          [ -n "$TOKENS_OUT" ] && extra+=(--tokens-out "$TOKENS_OUT")
+          [ -n "$COST_USD" ] && extra+=(--cost-usd "$COST_USD")
+          [ -n "$DURATION_SEC" ] && extra+=(--duration-sec "$DURATION_SEC")
+          [ -n "$SKILLS_DIR" ] && extra+=(--skills "$SKILLS_DIR")
+          if [ -n "${METRICS_ERROR:-}" ]; then
+            extra+=(--metrics-error "$METRICS_ERROR")
+          else
+            extra+=(--metrics out/metrics.json)
+          fi
+          # 比較元が解決できない場合、Hard Gate 不合格の試行は差分なしで記録だけする
+          repo=()
+          [ -n "${BASE_SHA:-}" ] && repo+=(--repo . --base "$BASE" --head "$HEAD")
+          python "$KIT/scripts/make_row.py" \
+            --run-id "$RUN_ID" --task-id "$TASK_ID" --variant "$VARIANT" --attempt "$ATTEMPT" \
+            --hard-gate "$HARD_GATE" --task "$TASK_FILE" "${repo[@]}" \
+            --ci ci-summary/ci.txt --pr pr.md \
+            --dataset out/runs.jsonl --manifest out/manifest.jsonl "${extra[@]}"
+
+      - uses: azure/login@v2
+        if: env.HARD_GATE == 'pass' || vars.LLM_JUDGE_PROJECT != ''
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Judge を実行（Hard Gate 合格時のみ）
+        if: env.HARD_GATE == 'pass'
+        run: |
+          python "$KIT/scripts/run_eval.py" out/runs.jsonl --repeats 3 --name "judge-$RUN_ID"
+          results_dir=$(ls -td "$KIT"/results/eval_* | head -1)
+          echo "RESULTS_DIR=$results_dir" >> "$GITHUB_ENV"
+          # この Run 単体の集計（観点別の中央値、人間レビューの要否、指標の悪化）
+          python "$KIT/scripts/aggregate.py" "$results_dir" out/manifest.jsonl | tee out/aggregate.txt
+
+      # Hard Gate 不合格の試行も送る（合格率・コストの集計に使う）
+      - name: 可視化基盤に送信（設定されている場合のみ）
+        if: vars.LLM_JUDGE_PROJECT != ''
+        env:
+          LLM_JUDGE_COSMOS_ENDPOINT: ${{ vars.LLM_JUDGE_COSMOS_ENDPOINT }}
+          APPLICATIONINSIGHTS_CONNECTION_STRING: ${{ secrets.APPLICATIONINSIGHTS_CONNECTION_STRING }}
+          LLM_JUDGE_PROJECT: ${{ vars.LLM_JUDGE_PROJECT }}
+        run: |
+          extra=()
+          [ -n "${RESULTS_DIR:-}" ] && extra+=(--results-dir "$RESULTS_DIR")
+          python "$KIT/scripts/publish_results.py" --project "$LLM_JUDGE_PROJECT" --manifest out/manifest.jsonl "${extra[@]}"
+
+      # 方式どうしの比較は、全 Run の成果物を集めてから aggregate.py / run_pairwise.py で行う
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: llm-judge-${{ inputs.run_id }}
+          path: |
+            out/
+            ${{ env.KIT }}/results/

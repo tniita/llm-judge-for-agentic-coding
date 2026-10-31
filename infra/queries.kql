@@ -1,0 +1,86 @@
+// Log Analytics ワークスペース（infra/main.bicep の logAnalytics）で使うクエリ集。
+// Application Insights のデータはワークスペースの AppEvents / AppMetrics テーブルに入る。
+// Workbook（infra/workbook.json）と同じ内容を、アドホックな分析用にワークスペースのテーブル名で書いたもの。
+
+// ---- プロジェクト別・方式別の平均総合点と人間レビュー件数 ----
+AppEvents
+| where TimeGenerated > ago(30d) and Name == "LlmJudgeRun"
+| extend project = tostring(Properties.project), variant = tostring(Properties.variant),
+         eval_id = tostring(Properties.eval_id), run_id = tostring(Properties.run_id)
+| summarize arg_max(TimeGenerated, *) by eval_id, run_id
+| summarize runs = count(), avg_total = round(avg(todouble(Measurements.total)), 1),
+            human_review = countif(todouble(Measurements["human_review.count"]) > 0)
+  by project, variant
+| order by project asc, avg_total desc;
+
+// ---- Hard Gate 合格率・1 試行あたりのコスト（不合格の試行を含む） ----
+AppEvents
+| where TimeGenerated > ago(30d) and Name == "LlmJudgeAttempt"
+| extend project = tostring(Properties.project), variant = tostring(Properties.variant),
+         run_id = tostring(Properties.run_id), hard_gate = tostring(Properties.hard_gate)
+| summarize arg_max(TimeGenerated, *) by run_id
+| summarize attempts = count(), pass_rate = round(countif(hard_gate == "pass") * 1.0 / count(), 2),
+            avg_cost_usd = round(avg(todouble(Measurements.cost_usd)), 3),
+            avg_tokens_in = avg(todouble(Measurements.tokens_in)), avg_tokens_out = avg(todouble(Measurements.tokens_out))
+  by project, variant;
+
+// ---- 方式ごとのトークン利用量（APIM の llm-emit-token-metric） ----
+AppMetrics
+| where TimeGenerated > ago(30d) and Name in ("Prompt Tokens", "Completion Tokens", "Total Tokens")
+| extend project = tostring(Properties.project), variant = tostring(Properties.variant)
+| summarize tokens = sum(Sum) by project, variant, Name
+| order by project asc, variant asc;
+
+// ---- Run ごとのトークン利用量と評価スコア（実行基盤の usage を送ったイベントを使用） ----
+let tokens = AppEvents
+| where TimeGenerated > ago(30d) and Name == "LlmJudgeAttempt"
+| extend project = tostring(Properties.project), run_id = tostring(Properties.run_id)
+| summarize arg_max(TimeGenerated, *) by project, run_id
+| project project, run_id,
+          tokens = todouble(Measurements.tokens_in) + todouble(Measurements.tokens_out);
+AppEvents
+| where TimeGenerated > ago(30d) and Name == "LlmJudgeRun"
+| extend project = tostring(Properties.project), variant = tostring(Properties.variant),
+         run_id = tostring(Properties.run_id), eval_id = tostring(Properties.eval_id)
+| summarize arg_max(TimeGenerated, *) by project, eval_id, run_id
+| join kind=leftouter tokens on project, run_id
+| where isnotnull(tokens) and tokens > 0
+| project project, variant, run_id, total = todouble(Measurements.total), tokens
+| summarize avg_total = avg(total), avg_tokens = avg(tokens), points_per_1k_tokens = avg(total) / (avg(tokens) / 1000)
+  by project, variant;
+
+// ---- 機械的な指標の悪化（Δ の平均） ----
+AppEvents
+| where TimeGenerated > ago(30d) and Name == "LlmJudgeAttempt"
+| extend project = tostring(Properties.project), variant = tostring(Properties.variant)
+| summarize dV = avg(todouble(Measurements["metrics_delta.complexity_total"])),
+            dup_lines = avg(todouble(Measurements["metrics_delta.duplicated_lines"])),
+            dPC = avg(todouble(Measurements["metrics_delta.propagation_cost"])),
+            dQ = avg(todouble(Measurements["metrics_delta.modularity"]))
+  by project, variant;
+
+// ---- 絶対評価・ペア比較のどちらかで人間レビューが必要な Run と、人間の最終判断 ----
+let human = AppEvents
+| where TimeGenerated > ago(30d) and Name == "LlmJudgeHumanReview"
+| extend project = tostring(Properties.project), review_key = tostring(Properties.review_key)
+| summarize arg_max(TimeGenerated, *) by project, review_key
+| project project, review_key, human_reviewed_at = TimeGenerated,
+          human_decision = tostring(Properties.decision), human_comment = tostring(Properties.comment);
+AppEvents
+| where TimeGenerated > ago(30d) and Name in ("LlmJudgeRun", "LlmJudgePair")
+| extend project = tostring(Properties.project), eval_id = tostring(Properties.eval_id),
+         review_id = iff(Name == "LlmJudgePair", tostring(Properties.pair_id), tostring(Properties.run_id))
+| summarize arg_max(TimeGenerated, *) by project, eval_id, Name, review_id
+| where todouble(Measurements["human_review.count"]) > 0
+| extend review_key = iff(Name == "LlmJudgePair", strcat(eval_id, ":", review_id), review_id)
+| join kind=leftouter human on project, review_key
+| extend run_ids = iff(Name == "LlmJudgePair", pack_array(Properties.run_a, Properties.run_b), pack_array(Properties.run_id))
+| mv-expand run_id = run_ids to typeof(string)
+| extend variant = iff(Name == "LlmJudgePair",
+                       iff(run_id == tostring(Properties.run_a), tostring(Properties.variant_a), tostring(Properties.variant_b)),
+                       tostring(Properties.variant))
+| extend status = iff(isnull(human_reviewed_at), "未レビュー", "レビュー済み")
+| project TimeGenerated, status, project, task_id = tostring(Properties.task_id), eval_id, review_id, variant, run_id,
+          total = todouble(Measurements.total), reasons = tostring(Properties.human_review),
+          human_decision, human_comment, human_reviewed_at
+| order by status desc, TimeGenerated desc

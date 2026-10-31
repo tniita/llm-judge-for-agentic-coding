@@ -1,0 +1,36 @@
+[
+  {
+    "run_id": "r-5c0f56a6",
+    "task_id": "T02",
+    "variant": "sonnet-single",
+    "attempt": 1,
+    "hard_gate": "pass",
+    "visible": "23 passed in 0.03s",
+    "hidden": "9 passed in 0.01s",
+    "lint": 0,
+    "cost_usd": 0.0830443,
+    "turns": 14,
+    "denials": 1,
+    "agent_error": null,
+    "make_row": [
+      "r-5c0f56a6: 追加しました（差分 3,661 文字）"
+    ]
+  },
+  {
+    "run_id": "r-21b10539",
+    "task_id": "T02",
+    "variant": "opus-single",
+    "attempt": 1,
+    "hard_gate": "pass",
+    "visible": "32 passed in 0.02s",
+    "hidden": "9 passed in 0.03s",
+    "lint": 0,
+    "cost_usd": 0.16028240000000002,
+    "turns": 9,
+    "denials": 3,
+    "agent_error": null,
+    "make_row": [
+      "r-21b10539: 追加しました（差分 5,130 文字）"
+    ]
+  }
+]
