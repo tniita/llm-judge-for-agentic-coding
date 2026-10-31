@@ -2,6 +2,7 @@
 
 コーディングエージェントが既存コードを改修した PR を、Microsoft Foundry に登録した評価器（LLM Judge）で採点し、**方式どうし（例: 固定モデルと HydraFusion）の品質・合格率・コストを方式名を伏せた同じ条件で比較する**ためのキットです。CI で品質の土台を担保し、機械的に測れる指標の差分とプロジェクトの Skill（ルール）を Judge に渡して改修の「質」を評価します。迷うケースだけを人間のブラインドレビューに回し、結果は Azure の可視化基盤に集めます。
 
+まず動かしてみる場合は「[クイックスタート](#クイックスタート)」、検証実験の結果は「[検証実験](#検証実験experiments)」を参照してください。
 ## 全体の流れ
 
 ```mermaid
@@ -53,7 +54,7 @@ flowchart LR
 ## セットアップ
 
 ```bash
-az account set --subscription ceb68e54-82cc-47aa-999a-18821f56cf54
+az account set --subscription <subscription-id>   # Foundry プロジェクトのサブスクリプション
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -r requirements.txt   # radon（指標計算）と azure-cosmos（結果の送信）を含む
 
@@ -62,6 +63,20 @@ uv pip install --python .venv/bin/python -r requirements.txt   # radon（指標�
 ```
 
 以降のコマンドはすべてリポジトリのルートから実行します。
+
+> **Windows（PowerShell）の場合:** `.venv/bin/python` を `.venv\Scripts\python.exe` に、`export NAME=value` を `$env:NAME = "value"` に読み替えてください。行末の `\` による改行は PowerShell ではバッククォート（`` ` ``）です。
+
+## クイックスタート
+
+セットアップ後、欠陥を仕込んだサンプル（[カナリア](#カナリアjudge-の検出力チェック)）で一連の流れを確認できます。評価対象のリポジトリは不要です。
+
+```bash
+.venv/bin/python scripts/check_canaries.py build                     # カナリアの評価データを作る
+.venv/bin/python scripts/run_eval.py datasets/canaries/canary_runs.jsonl --repeats 3 --name canary
+.venv/bin/python scripts/check_canaries.py check results/<eval_id>   # 期待した判定になったかを確認
+```
+
+`<eval_id>` は `run_eval.py` の出力に表示されます。自分のリポジトリで評価するときは、次の「使い方」の 1〜5 を順に実行します。
 
 ## 使い方
 
@@ -172,7 +187,8 @@ Run ごとに [scripts/make_row.py](scripts/make_row.py) を実行します。Ju
 ```bash
 .venv/bin/python scripts/calibration.py export datasets/runs.jsonl --flagged results/<eval_id>/summary.jsonl \
   --out review.csv --packet-dir review/
-.venv/bin/python scripts/calibration.py export-pairs datasets/runs.jsonl results/<pairwise_eval_id> --flagged
+.venv/bin/python scripts/calibration.py export-pairs datasets/runs.jsonl results/<pairwise_eval_id> --flagged \
+  --out pairs_review.csv --packet-dir review_pairs/   # 対応表 review_pairs/_key.json も書き出される
 .venv/bin/python scripts/publish_results.py --project shoplib --manifest datasets/manifest.jsonl --human-reviews review.csv
 .venv/bin/python scripts/publish_results.py --project shoplib --manifest datasets/manifest.jsonl \
   --pairwise-dir results/<pairwise_eval_id> --human-pair-reviews pairs_review.csv --pair-key review_pairs/_key.json
@@ -283,6 +299,35 @@ export APPLICATIONINSIGHTS_CONNECTION_STRING="InstrumentationKey=...;IngestionEn
 ```
 
 エージェントが使えるのはファイル操作と、venv の pytest / ruff の実行だけです（それ以外のコマンドは拒否されます）。
+
+### 結果（2026-10-22、各方式 10 タスク × 1 回）
+
+Judge は `gpt-6.1-sol`（`2026-09-29`）です。絶対評価は 3 回採点（[eval_486c…](results/eval_486c5635e38a4d768d9ef2fddfb8a692/)）、ペア比較は A/B 入れ替え × 2 回（[eval_0c63…](results/eval_0c63f1696c2b4124833c8e72535d568b/)）です。
+
+| 項目 | `opus-single` | `sonnet-single` |
+|---|---|---|
+| Hard Gate 合格率 | 100%（10/10） | 100%（10/10） |
+| 平均総合点（0〜100） | 94.1 | 92.0 |
+| 要件の充足率 | 98.3% | 98.3% |
+| 重大問題の発生率 | 0% | 0% |
+| テストの妥当性 / 堅牢性 / 説明（0〜5） | 4.9 / 4.2 / 4.6 | 4.1 / 4.4 / 4.8 |
+| 要件充足度・設計・保守性・変更の適切さ（0〜5） | 4.8・5.0・4.8・4.7 | 4.8・5.0・4.8・4.7 |
+| 1 試行あたりのコスト | $0.31 | $0.09 |
+| 1 試行あたりのトークン（入力 / 出力） | 116k / 10.7k | 51k / 6.4k |
+| 1 試行あたりの所要時間 | 145 秒 | 64 秒 |
+
+| 方式どうしの比較 | `opus-single` の勝ち | `sonnet-single` の勝ち | 引き分け | 符号検定の p 値 |
+|---|---|---|---|---|
+| 絶対評価（総合点） | 7 | 1 | 2 | 0.070 |
+| ペア比較 | 9 | 1 | 0 | 0.021 |
+
+読み取れること:
+
+- **天井効果:** 両方式とも合格率 100%、要件の充足率 98% で、総合点の差は平均 2.1 点しかありません。タスクが易しく、差がつきにくい条件でした。方式の差を見るには、難しいタスクを加えて 20 タスク以上 × 複数回の生成で再評価する必要があります
+- **差はテストの妥当性に集中:** 観点別では、テストの妥当性（4.9 対 4.1）以外はほぼ同点でした
+- **コストと品質のトレードオフ:** `opus-single` はペア比較で優位でした（p = 0.021、位置バイアス 0.05、順序の逆転なし）。一方で、コストは約 3.3 倍、所要時間は約 2.3 倍かかっています
+- **人間レビュー:** 集計は `--gap 15` で行ったため、方式間の総合点差がすべての組で 15 未満となり、全 20 Run が人間レビュー対象になりました（うち 5 Run は試行間の差 2 点以上にも該当）。Judge の判断が人間と一致するかは未確認なので、上の優劣は暫定です
+- **指標・Skill は未使用:** 実験データは `metrics.py` と Skill の機能を追加する前に作成したため、`metrics_delta` と `project_skills` を含みません（`variants.json` の指標の差分はすべて `null`）。含めて評価するには、`run_agents.py` が呼ぶ `make_row.py` に `--metrics` / `--skills` を渡すよう変更し、データを作り直す必要があります
 
 ### 人間による答え合わせ（未実施）
 
