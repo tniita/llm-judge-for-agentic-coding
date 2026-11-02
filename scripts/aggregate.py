@@ -2,12 +2,14 @@
 
 使い方:
   python scripts/aggregate.py results/<eval_id> datasets/manifest.jsonl --gap 5
+  # Run ごとに別々に評価した結果をまとめて集計する（CI の llm-judge-compare など）
+  python scripts/aggregate.py --manifest merged_manifest.jsonl --out-dir compare/absolute results/<eval_1> results/<eval_2>
 
 manifest は run_id → task_id / variant / attempt / hard_gate / コストの対応表。Judge には渡さず、ここでだけ使う。
 Hard Gate 不合格の Run も manifest に入れておくと、合格率とコストを集計できる。
 manifest に機械的な指標の差分（make_row.py --metrics）があれば、config.py の METRIC_THRESHOLDS を超えて悪化した Run を人間レビューに回す。
 
-出力:
+出力（--out-dir を指定した場合はそのディレクトリ）:
   results/<eval_id>/summary.jsonl   Run ごとの結果
   results/<eval_id>/variants.json   方式ごとの集計と方式どうしの比較
 """
@@ -105,21 +107,40 @@ def summarize_run(run_id: str, by_key: dict[str, list[dict]], spread: float) -> 
     }
 
 
-def main() -> None:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("results_dir", type=Path)
-    parser.add_argument("manifest", type=Path)
+    parser.add_argument("paths", type=Path, nargs="*",
+                        help="results/<eval_id> と manifest（従来の形式）。--manifest 指定時は results/<eval_id> を 0 個以上")
+    parser.add_argument("--manifest", type=Path, help="対応表。指定すると位置引数はすべて結果ディレクトリとして扱う")
+    parser.add_argument("--out-dir", type=Path, help="summary.jsonl / variants.json の出力先（結果ディレクトリが 1 つでない場合は必須）")
     parser.add_argument("--gap", type=float, default=5, help="同じタスクで方式間の総合点（0〜100）の差がこれ未満なら人間レビュー")
     parser.add_argument("--spread", type=float, default=2, help="試行間の点差がこれ以上なら人間レビュー")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.manifest is None:
+        if len(args.paths) != 2:
+            parser.error("results/<eval_id> と manifest を指定するか、--manifest を使ってください")
+        *args.results_dirs, args.manifest = args.paths
+    else:
+        args.results_dirs = args.paths
+    if args.out_dir is None:
+        if len(args.results_dirs) != 1:
+            parser.error("結果ディレクトリが 1 つでない場合は --out-dir が必要です")
+        args.out_dir = args.results_dirs[0]
+    return args
 
+
+def main() -> None:
+    args = parse_args()
     manifest = {r["run_id"]: r for r in load_jsonl(args.manifest)}
 
     trials: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
-    for path in sorted(args.results_dir.glob("trial*.jsonl")):
-        for row in load_jsonl(path):
-            for r in row["results"]:
-                trials[row["datasource_item"]["run_id"]][r["name"]].append(r)
+    for results_dir in args.results_dirs:
+        if not results_dir.is_dir():
+            raise SystemExit(f"{results_dir}: 結果ディレクトリがありません")
+        for path in sorted(results_dir.glob("trial*.jsonl")):
+            for row in load_jsonl(path):
+                for r in row["results"]:
+                    trials[row["datasource_item"]["run_id"]][r["name"]].append(r)
 
     runs = {}
     for run_id, by_key in trials.items():
@@ -212,10 +233,11 @@ def main() -> None:
             },
         }
 
-    (args.results_dir / "summary.jsonl").write_text(
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    (args.out_dir / "summary.jsonl").write_text(
         "".join(json.dumps(s, ensure_ascii=False) + "\n" for s in runs.values()), encoding="utf-8"
     )
-    (args.results_dir / "variants.json").write_text(
+    (args.out_dir / "variants.json").write_text(
         json.dumps({"variants": variant_stats, "comparisons": comparisons, "weights": WEIGHTS},
                    ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -254,7 +276,7 @@ def main() -> None:
         print("  ※ 勝敗のついたタスクが 10 件未満のため、p 値はほぼ有意になりません。タスク数を増やしてください")
 
     reviewed = sum(1 for s in runs.values() if s["human_review"])
-    print(f"\n人間レビュー対象: {reviewed}/{len(runs)} 件  → {args.results_dir}")
+    print(f"\n人間レビュー対象: {reviewed}/{len(runs)} 件  → {args.out_dir}")
 
 
 if __name__ == "__main__":

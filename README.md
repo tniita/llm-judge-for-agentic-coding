@@ -163,6 +163,11 @@ Run ごとに [scripts/make_row.py](scripts/make_row.py) を実行します。Ju
 
 結果は `summary.jsonl`（Run ごと）と `variants.json`（方式ごと・比較）にも保存されます。
 
+Run ごとに別々に評価した結果（CI で Run ごとに `run_eval.py` を実行した場合など）は、`--manifest` と `--out-dir` を付けて複数の結果ディレクトリをまとめて集計できます。
+
+```bash
+.venv/bin/python scripts/aggregate.py --manifest merged_manifest.jsonl --out-dir results/merged results/<eval_1> results/<eval_2>
+```
 ### 6. ペア比較
 
 ```bash
@@ -347,15 +352,47 @@ Judge は `gpt-6.1-sol`（`2026-09-29`）です。絶対評価は 3 回採点（
 
 ## GitHub Actions
 
-[ci/llm-judge.yml](ci/llm-judge.yml) はテンプレートです（未実行）。評価対象のリポジトリにこのキットを `tools/llm-judge/` として置き、ワークフローを `.github/workflows/` にコピーして使います。
+[ci/llm-judge.yml](ci/llm-judge.yml)（Run ごと）と [ci/llm-judge-compare.yml](ci/llm-judge-compare.yml)（タスクごとの方式比較）はテンプレートです（未実行）。評価対象のリポジトリにこのキットを `tools/llm-judge/` として置き、ワークフローを `.github/workflows/` にコピーして使います。
+
+### Run ごと（llm-judge.yml）
 
 - 対象リポジトリの CI が Build・Test（Hidden test を含む）・Lint・CodeQL を実行し、その結論が Hard Gate になる
-- エージェントの実行基盤が、CI 完了後に `workflow_dispatch` で inputs（Run ID、方式名、base/head、CI の run ID、Skill のディレクトリなど）を渡して起動する
+- エージェントの実行基盤が、CI 完了後に `workflow_dispatch` で inputs（Run ID、方式名、base/head、CI の run ID、Skill のディレクトリなど）を渡して起動する。`task_id` は英数字・`_`・`.` だけ（ハイフン不可）、`run_id` は英数字・`_`・`.`・`-` だけを使う（成果物名からタスクを取り出すため）
 - ワークフローは共通祖先と head の SHA を固定し、指標と PR 差分で同じコミットを使う。共通祖先がない場合や `metrics.py` が失敗した場合も止めず、指標を計測不能として記録する（Hard Gate 不合格の試行も記録される）。解析結果は `actions/cache` で再利用し、変更されたファイルだけを再計算する
 - リポジトリ変数 `LLM_JUDGE_PROJECT`・`LLM_JUDGE_COSMOS_ENDPOINT` とシークレット `APPLICATIONINSIGHTS_CONNECTION_STRING` を設定すると、Hard Gate 不合格の試行も含めて可視化基盤に送る
 - CI ワークフローは結果の要約を `ci-summary` という名前の成果物（`ci.txt`）としてアップロードしておく
 - OIDC でログインするため、フェデレーション資格情報付きのアプリ登録を作り、Foundry プロジェクトに Azure AI User ロールを付与する。シークレットは `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID`
-- Run ごとの結果は成果物として保存される。方式どうしの比較は、全 Run の成果物を集めてから `aggregate.py` / `run_pairwise.py` で行う
+- Run ごとの評価データ・対応表・評価結果を成果物 `llm-judge-run-<task_id>-<run_id>` として保存する。リポジトリ変数 `LLM_JUDGE_COMPARE_VARIANTS` を設定すると、最後に `llm-judge-compare.yml` を起動する
+
+### タスクごとの方式比較（llm-judge-compare.yml）
+
+「方式間の総合点差が小さい」「A/B の順序で判定が逆転」は、同じタスクの複数方式が揃わないと判定できないため、別のワークフローで行います。
+
+```mermaid
+flowchart TD
+  T[llm-judge.yml の終了時 / 6 時間ごと] --> C{同じタスクの<br>方式 × attempt が揃った？}
+  C -- まだ --> X[何もしない]
+  C -- 揃った / 待ち時間切れ --> D{比較済み？<br>同じ Run の組の成果物がある}
+  D -- はい --> X
+  D -- いいえ --> Q{両方式とも Hard Gate<br>合格の組がある？}
+  Q -- はい --> PW[run_pairwise.py]
+  Q -- いいえ --> AG
+  PW --> AG[aggregate.py<br>Run ごとの結果をまとめて総合点差・勝敗]
+  AG --> R{人間レビューの条件？<br>逆転・欠損・low confidence・差が gap 未満}
+  R -- はい --> I[レビュー用リポジトリに資料と Issue]
+  R --> P[比較の結果だけを可視化基盤へ]
+  I --> M[成果物 llm-judge-compare-* を残す<br>＝比較済みの印]
+  P --> M
+```
+
+- **揃ったかの判定:** `scripts/collect_task.py` が成果物 `llm-judge-run-<task_id>-*` を集め、`LLM_JUDGE_COMPARE_VARIANTS` × `LLM_JUDGE_COMPARE_ATTEMPTS` の Run が揃ったかを見る。Hard Gate 不合格の Run も「揃った」に数える。同じ Run の再実行は最新の成果物を、同じ方式・attempt に複数の Run があれば最新の Run を使う
+- **待ち時間:** 最初の Run から `LLM_JUDGE_COMPARE_TIMEOUT_HOURS`（既定 24 時間）を過ぎたら、揃った分だけで比較し、未提出を `collect.json` に記録する。比較できる方式が 2 つ未満なら比較しない
+- **二重実行の防止:** タスクごとの `concurrency` と、比較した Run の組から作る成果物名（`llm-judge-compare-<task_id>-<ハッシュ>`）で、同じ組を二度比較しない。途中で失敗した場合はこの成果物を残さず、次の起動でやり直す。後から Run が増えると組が変わるため再比較する
+- **取りこぼしの拾い直し:** 6 時間ごとに、直近 `LLM_JUDGE_COMPARE_LOOKBACK_DAYS`（既定 14 日）に Run の成果物があり、まだ比較していないタスクを処理する
+- **人間レビュー:** `LLM_JUDGE_REVIEW_REPO`（owner/name）と、そのリポジトリに Contents / Issues の書き込み権限を持つ GitHub App（`LLM_JUDGE_REVIEW_APP_ID` とシークレット `LLM_JUDGE_REVIEW_APP_PRIVATE_KEY`）を設定すると、方式名を伏せた資料（`calibration.py export-pairs --flagged` / `export --flagged`）を `reviews/<task_id>/<成果物名>/` に置いて Issue を作る。ペア比較の対応表（`pairs_key.json`）は比較の成果物にだけ残す。レビュー用リポジトリは評価対象とは別の非公開リポジトリにし、レビュアーには評価対象リポジトリの Actions を見せない。埋めたシートは、比較の成果物の `pairwise/` と `pairs_key.json` を使って `publish_results.py --human-pair-reviews` / `--human-reviews` で送る
+- **可視化基盤:** Run ごとの結果は `llm-judge.yml` が送り済みなので、`publish_results.py --types comparison,pairwise,pair` で比較の結果だけを送る
+- **ジョブの概要:** 状態・揃った Run 数・人間レビューの件数だけを書き、方式名と勝敗は書かない
+- タスクをまたいだ方式比較（符号検定の p 値など）は対象外。全成果物を集めて `aggregate.py` / `run_pairwise.py` を実行する
 
 ## 可視化基盤（Azure）
 
@@ -408,13 +445,15 @@ az bicep build --file infra/main.bicep --stdout > /dev/null
 | [scripts/run_pairwise.py](scripts/run_pairwise.py) | ペア比較の実行と集計 |
 | [scripts/calibration.py](scripts/calibration.py) | 人間との答え合わせ、改善レポート、一致率の推移 |
 | [scripts/publish_results.py](scripts/publish_results.py) | 結果を Cosmos DB / Application Insights に送信 |
+| [scripts/collect_task.py](scripts/collect_task.py) | CI の Run ごとの成果物を集め、タスクの全方式が揃ったかを判定（llm-judge-compare.yml 用） |
 | [scripts/check_canaries.py](scripts/check_canaries.py) | カナリアの作成と検出力の判定 |
 | [scripts/foundry_eval.py](scripts/foundry_eval.py) | Foundry の評価 API 呼び出しと実行メタデータの記録 |
 | [scripts/stats_utils.py](scripts/stats_utils.py) | 符号検定などの統計関数 |
 | [project_skills/](project_skills/) | プロジェクトの Skill のテンプレート（エージェントと Judge に渡す） |
 | [infra/](infra/) | 可視化基盤の Bicep、APIM ポリシー、Workbook、KQL |
 | [datasets/](datasets/) | サンプルデータとカナリア |
-| [ci/llm-judge.yml](ci/llm-judge.yml) | GitHub Actions のテンプレート |
+| [ci/llm-judge.yml](ci/llm-judge.yml) | GitHub Actions のテンプレート（Run ごとの評価） |
+| [ci/llm-judge-compare.yml](ci/llm-judge-compare.yml) | GitHub Actions のテンプレート（タスクごとの方式比較） |
 | [experiments/](experiments/) | 検証実験（検証用リポジトリ・10 タスク・Hidden test・エージェント実行ハーネス・人間用の採点資料） |
 | `results/<eval_id>/` | 試行ごとの結果、`run_meta.json`、集計結果 |
 

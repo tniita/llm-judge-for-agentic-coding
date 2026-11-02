@@ -1,0 +1,272 @@
+# 同じタスクの全方式の Run が揃ったら、方式どうしを比較するワークフローのテンプレート（llm-judge.yml と一緒に使う）。
+# 評価対象のリポジトリの .github/workflows/ にコピーして使う。
+#
+# 流れ:
+#   llm-judge.yml（Run ごと）の終了時に task_id 付きで起動されるほか、定期実行で取りこぼしを拾う
+#   1. 成果物 llm-judge-run-<task_id>-* を集め、方式 × attempt の Run が揃ったかを判定する（collect_task.py）
+#      揃っていなければ何もせず終わる。最初の Run から待ち時間を過ぎたら、揃った分だけで比較する
+#   2. 両方式とも Hard Gate に合格した組があれば、A/B を入れ替えてペア比較する（run_pairwise.py）
+#   3. Run ごとの絶対評価の結果をまとめて、方式間の総合点差・タスク単位の勝敗を出す（aggregate.py）
+#   4. 人間レビューの条件（ペア比較の判定の逆転・欠損・low confidence、総合点差が gap 未満）に当てはまれば、
+#      方式名を伏せた資料をレビュー用リポジトリに置き、Issue を作る
+#   5. 比較の結果だけを可視化基盤に送る（Run ごとの結果は llm-judge.yml が送り済み）
+#   6. 結果を成果物 llm-judge-compare-<task_id>-<比較した Run の組のハッシュ> として残す。これが比較済みの印になる
+#
+# 設定（リポジトリ変数）:
+#   LLM_JUDGE_COMPARE_VARIANTS        比較する方式（カンマ区切り、必須。例: fixed,hydrafusion）
+#   LLM_JUDGE_COMPARE_ATTEMPTS        方式ごとの生成回数（既定 1）
+#   LLM_JUDGE_COMPARE_TIMEOUT_HOURS   最初の Run からこの時間を過ぎたら揃った分だけで比較する（既定 24）
+#   LLM_JUDGE_COMPARE_LOOKBACK_DAYS   定期実行で見る成果物の期間（既定 14）
+#   LLM_JUDGE_GAP                     方式間の総合点差がこれ未満なら人間レビュー（既定 5）
+#   LLM_JUDGE_PAIRWISE_REPEATS        ペア比較の各順序の試行回数（既定 1）
+#   LLM_JUDGE_PROJECT / LLM_JUDGE_COSMOS_ENDPOINT と シークレット APPLICATIONINSIGHTS_CONNECTION_STRING（llm-judge.yml と同じ）
+#   人間レビューを Issue にする場合（任意）:
+#     LLM_JUDGE_REVIEW_REPO            レビュー用リポジトリ（owner/name）。評価対象とは別の非公開リポジトリにし、
+#                                       レビュアーには評価対象リポジトリの Actions（成果物に対応表がある）を見せない
+#     LLM_JUDGE_REVIEW_APP_ID と シークレット LLM_JUDGE_REVIEW_APP_PRIVATE_KEY
+#                                       レビュー用リポジトリに Contents / Issues の書き込み権限を持つ GitHub App
+#   OIDC のシークレット AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID（llm-judge.yml と同じ）
+name: llm-judge-compare
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_id: { description: "比較するタスク ID", required: true }
+  schedule:
+    - cron: "23 */6 * * *"
+
+permissions:
+  id-token: write
+  contents: read
+  actions: read
+
+jobs:
+  plan:
+    if: vars.LLM_JUDGE_COMPARE_VARIANTS != ''
+    runs-on: ubuntu-latest
+    outputs:
+      tasks: ${{ steps.tasks.outputs.tasks }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      KIT: tools/llm-judge
+      INPUT_TASK_ID: ${{ inputs.task_id }}
+      LOOKBACK_DAYS: ${{ vars.LLM_JUDGE_COMPARE_LOOKBACK_DAYS || '14' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 比較するタスクを決める
+        id: tasks
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            tasks=$(jq -cn --arg t "$INPUT_TASK_ID" '[$t]')
+          else
+            tasks=$(python3 "$KIT/scripts/collect_task.py" tasks --lookback-days "$LOOKBACK_DAYS")
+          fi
+          echo "tasks=$tasks" >> "$GITHUB_OUTPUT"
+          echo "対象タスク: $tasks"
+
+  compare:
+    needs: plan
+    if: needs.plan.outputs.tasks != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        task_id: ${{ fromJSON(needs.plan.outputs.tasks) }}
+    # 同じタスクの比較が二重に走らないようにする（Run ごとのワークフローがほぼ同時に終わった場合など）
+    concurrency:
+      group: llm-judge-compare-${{ matrix.task_id }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      KIT: tools/llm-judge
+      TASK_ID: ${{ matrix.task_id }}
+      VARIANTS: ${{ vars.LLM_JUDGE_COMPARE_VARIANTS }}
+      ATTEMPTS: ${{ vars.LLM_JUDGE_COMPARE_ATTEMPTS || '1' }}
+      TIMEOUT_HOURS: ${{ vars.LLM_JUDGE_COMPARE_TIMEOUT_HOURS || '24' }}
+      GAP: ${{ vars.LLM_JUDGE_GAP || '5' }}
+      PAIRWISE_REPEATS: ${{ vars.LLM_JUDGE_PAIRWISE_REPEATS || '1' }}
+      REVIEW_REPO: ${{ vars.LLM_JUDGE_REVIEW_REPO }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r "$KIT/requirements.txt"
+
+      - name: 成果物を集めて揃ったかを判定
+        id: collect
+        run: |
+          python "$KIT/scripts/collect_task.py" download --task-id "$TASK_ID" --dest artifacts
+          python "$KIT/scripts/collect_task.py" merge --task-id "$TASK_ID" --variants "$VARIANTS" \
+            --attempts "$ATTEMPTS" --timeout-hours "$TIMEOUT_HOURS" --artifacts artifacts --out compare
+
+      - name: 比較済みか確認
+        id: gate
+        if: steps.collect.outputs.ready == 'true'
+        env:
+          MARKER: ${{ steps.collect.outputs.marker }}
+        run: |
+          count=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$MARKER" \
+            --jq '[.artifacts[] | select(.expired | not)] | length')
+          if [ "$count" -gt 0 ]; then
+            echo "この Run の組は比較済みです（$MARKER）"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: azure/login@v2
+        if: steps.gate.outputs.run == 'true' && (steps.collect.outputs.pairwise == 'true' || vars.LLM_JUDGE_PROJECT != '')
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: ペア比較（両方式とも Hard Gate に合格した組があるときだけ）
+        if: steps.gate.outputs.run == 'true' && steps.collect.outputs.pairwise == 'true'
+        run: |
+          set -o pipefail
+          python "$KIT/scripts/run_pairwise.py" compare/runs.jsonl compare/manifest.jsonl \
+            --name "pairwise-$TASK_ID" --repeats "$PAIRWISE_REPEATS" | tee compare/pairwise.txt
+          results_dir=$(sed -n 's/^saved: //p' compare/pairwise.txt | tail -n 1)
+          [ -n "$results_dir" ] || { echo "::error::run_pairwise.py の結果ディレクトリが見つかりません"; exit 1; }
+          cp -r "$results_dir" compare/pairwise
+
+      - name: 方式間の総合点差とタスク単位の勝敗
+        if: steps.gate.outputs.run == 'true'
+        env:
+          MARKER: ${{ steps.collect.outputs.marker }}
+        run: |
+          set -o pipefail
+          mapfile -t dirs < compare/results_dirs.txt
+          python "$KIT/scripts/aggregate.py" --manifest compare/manifest.jsonl --out-dir compare/absolute \
+            --gap "$GAP" "${dirs[@]}" | tee compare/aggregate.txt
+          # 可視化基盤での ID（タスクごとに一意）
+          jq -n --arg id "$MARKER" '{eval_id: $id}' > compare/absolute/run_meta.json
+
+      - name: 人間レビューの資料を作る
+        id: review
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          mkdir -p compare/review
+          pairs=0
+          if [ -d compare/pairwise ]; then
+            python "$KIT/scripts/calibration.py" export-pairs compare/runs.jsonl compare/pairwise --flagged \
+              --out compare/review/pairs_review.csv --packet-dir compare/review/pairs
+            pairs=$(jq 'length' compare/review/pairs/_key.json)
+            # 対応表はレビュー資料と分けて保管する（採点が終わるまで開かない）
+            mv compare/review/pairs/_key.json compare/pairs_key.json
+          fi
+          # 方式間の総合点差が小さい Run（Run 単体の理由は llm-judge.yml の結果で確認済み）
+          jq -c 'select(any(.human_review[]?; contains("方式間の総合点差")))' compare/absolute/summary.jsonl \
+            > compare/gap_runs.jsonl
+          runs=0
+          if [ -s compare/gap_runs.jsonl ]; then
+            python "$KIT/scripts/calibration.py" export compare/runs.jsonl --flagged compare/gap_runs.jsonl \
+              --out compare/review/review.csv --packet-dir compare/review/runs
+            runs=$(wc -l < compare/gap_runs.jsonl)
+          fi
+          {
+            echo "pairs=$pairs"
+            echo "runs=$runs"
+            echo "count=$((pairs + runs))"
+          } >> "$GITHUB_OUTPUT"
+
+      # 方式名と勝敗は書かない（Actions を見たレビュアーに方式が分からないようにする）
+      - name: 概要
+        if: always() && steps.collect.outcome == 'success'
+        env:
+          REVIEW_COUNT: ${{ steps.review.outputs.count || '0' }}
+          COMPARED: ${{ steps.gate.outputs.run || 'false' }}
+        run: |
+          jq -r --arg reviews "$REVIEW_COUNT" --arg compared "$COMPARED" '
+            "### llm-judge-compare: \(.task_id)",
+            "",
+            "| 項目 | 値 |", "|---|---|",
+            "| 状態 | \(.status) |",
+            "| 揃った Run | \(.present | length) / \((.variants | length) * .attempts) |",
+            "| 未提出 | \(.missing | length) |",
+            "| ペア比較 | \(.pairwise) |",
+            "| 今回比較した | \($compared) |",
+            "| 人間レビュー | \($reviews) 件 |"
+          ' compare/collect.json >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 可視化基盤に送信（比較の結果だけ）
+        if: steps.gate.outputs.run == 'true' && vars.LLM_JUDGE_PROJECT != ''
+        env:
+          LLM_JUDGE_COSMOS_ENDPOINT: ${{ vars.LLM_JUDGE_COSMOS_ENDPOINT }}
+          APPLICATIONINSIGHTS_CONNECTION_STRING: ${{ secrets.APPLICATIONINSIGHTS_CONNECTION_STRING }}
+          LLM_JUDGE_PROJECT: ${{ vars.LLM_JUDGE_PROJECT }}
+        run: |
+          extra=(--results-dir compare/absolute)
+          [ -d compare/pairwise ] && extra+=(--pairwise-dir compare/pairwise)
+          python "$KIT/scripts/publish_results.py" --project "$LLM_JUDGE_PROJECT" --manifest compare/manifest.jsonl \
+            --types comparison,pairwise,pair "${extra[@]}"
+
+      - name: レビュー用リポジトリを確認
+        id: review_repo
+        if: steps.gate.outputs.run == 'true' && steps.review.outputs.count != '0' && vars.LLM_JUDGE_REVIEW_REPO != ''
+        run: |
+          [[ "$REVIEW_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "::error::LLM_JUDGE_REVIEW_REPO は owner/name 形式で指定してください"; exit 1; }
+          echo "owner=${REVIEW_REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${REVIEW_REPO#*/}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/create-github-app-token@v1
+        id: app
+        if: steps.review_repo.outcome == 'success'
+        with:
+          app-id: ${{ vars.LLM_JUDGE_REVIEW_APP_ID }}
+          private-key: ${{ secrets.LLM_JUDGE_REVIEW_APP_PRIVATE_KEY }}
+          owner: ${{ steps.review_repo.outputs.owner }}
+          repositories: ${{ steps.review_repo.outputs.name }}
+
+      - name: レビュー用リポジトリに資料を置いて Issue を作る
+        if: steps.app.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          MARKER: ${{ steps.collect.outputs.marker }}
+          PAIRS: ${{ steps.review.outputs.pairs }}
+          RUNS: ${{ steps.review.outputs.runs }}
+        run: |
+          dest="reviews/$TASK_ID/$MARKER"
+          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${REVIEW_REPO}.git" review-repo
+          mkdir -p "review-repo/$dest"
+          cp -r compare/review/. "review-repo/$dest/"
+          (
+            cd review-repo
+            git config user.name "llm-judge[bot]"
+            git config user.email "llm-judge[bot]@users.noreply.github.com"
+            git add "$dest"
+            git diff --cached --quiet || git commit -q -m "llm-judge: $MARKER のレビュー資料"
+            git push -q
+          )
+          # 再実行で Issue が重複しないようにする
+          existing=$(gh issue list -R "$REVIEW_REPO" --state all --search "\"$MARKER\" in:title" --json number --jq length)
+          if [ "$existing" -gt 0 ]; then
+            echo "Issue は作成済みです"
+            exit 0
+          fi
+          base="https://github.com/$REVIEW_REPO/tree/HEAD/$dest"
+          {
+            echo "タスク \`$TASK_ID\` の実装を、方式名を伏せた資料でレビューしてください。"
+            echo
+            if [ "$PAIRS" != 0 ]; then
+              echo "- **ペア比較 $PAIRS 組**: [pairs/]($base/pairs) の資料を読み、[pairs_review.csv]($base/pairs_review.csv) の \`better\` 列に A / B / same を入れる"
+            fi
+            if [ "$RUNS" != 0 ]; then
+              echo "- **絶対評価 $RUNS 件**（方式間の総合点差が小さい）: [runs/]($base/runs) の資料を読み、[review.csv]($base/review.csv) に観点ごとの点数（0〜5）と uncaught_critical（1=問題なし / 0=問題あり）を入れる"
+            fi
+            echo
+            echo "採点基準は評価器のルーブリック（evaluators/*.md）と同じです。埋めたシートをこのリポジトリにコミットしたら、この Issue を閉じてください。"
+          } > issue.md
+          gh issue create -R "$REVIEW_REPO" --title "[llm-judge] $TASK_ID のレビュー（$MARKER）" --body-file issue.md
+
+      # 比較済みの印を兼ねるため、最後まで成功したときだけ残す（失敗したら次の起動でやり直す）
+      - uses: actions/upload-artifact@v4
+        if: steps.gate.outputs.run == 'true'
+        with:
+          name: ${{ steps.collect.outputs.marker }}
+          path: compare/

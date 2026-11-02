@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import aggregate
 import calibration
+import collect_task
 import config
 import make_row
 import metrics
@@ -697,6 +698,164 @@ class MetricRobustnessTests(TemporaryTest):
         self.assertIn('extra+=(--metrics-error "$METRICS_ERROR")', workflow)
         self.assertIn("--prune-cache", workflow)
         self.assertIn("if ! python", workflow)
+
+
+class TaskCompareTests(TemporaryTest):
+    """llm-judge-compare.yml: Run ごとの成果物を集め、全方式が揃ったら比較する。"""
+
+    NOW = collect_task.parse_time("2026-11-02T12:00:00Z")
+
+    def setUp(self):
+        super().setUp()
+        self.artifacts = self.root / "artifacts"
+        self.artifacts.mkdir()
+        self.index = []
+
+    def add_artifact(self, run_id, variant, *, task="T1", attempt=1, hard_gate="pass",
+                     created="2026-11-02T10:00:00Z", judged=True):
+        directory = self.artifacts / f"a{len(self.index)}"
+        directory.mkdir()
+        write_jsonl(directory / "manifest.jsonl", [
+            {"run_id": run_id, "task_id": task, "variant": variant, "attempt": attempt, "hard_gate": hard_gate}])
+        if judged and hard_gate == "pass":
+            write_jsonl(directory / "runs.jsonl", [
+                {"run_id": run_id, "query": "R1", "response": f"diff-{run_id}", "ci_summary": "pass"}])
+            results = directory / "results" / f"eval_{run_id}"
+            results.mkdir(parents=True)
+            write_jsonl(results / "trial1.jsonl", [complete_trial(run_id)])
+        self.index.append({"name": f"llm-judge-run-{task}-{run_id}", "id": len(self.index),
+                           "created_at": created, "dir": directory.name})
+        write_json(self.artifacts / "_index.json", self.index)
+
+    def merge(self, variants=("a", "b"), attempts=1, timeout_hours=24):
+        return collect_task.merge("T1", list(variants), attempts, timeout_hours, self.artifacts,
+                                  self.root / "out", self.NOW)
+
+    def test_artifact_names_identify_the_task_even_when_run_ids_have_hyphens(self):
+        self.assertEqual(collect_task.artifact_task("llm-judge-run-T002-r-8f3a"), "T002")
+        self.assertEqual(collect_task.compare_task("llm-judge-compare-T002-0123abcd"), "T002")
+        for name in ("llm-judge-T002-r1", "llm-judge-run-T002", "llm-judge-compare-T002-x"):
+            self.assertIsNone(collect_task.artifact_task(name))
+
+    def test_complete_task_is_merged_for_pairwise_and_aggregate(self):
+        self.add_artifact("r1", "a")
+        self.add_artifact("r2", "b")
+        result = self.merge()
+        self.assertEqual((result["status"], result["pairwise"], result["missing"]), ("complete", True, []))
+        out = self.root / "out"
+        self.assertEqual(sorted(r["run_id"] for r in collect_task.load_jsonl(out / "runs.jsonl")), ["r1", "r2"])
+        dirs = (out / "results_dirs.txt").read_text().split()
+        self.assertEqual(len(dirs), 2)
+        invoke(aggregate, "--manifest", out / "manifest.jsonl", "--out-dir", out / "absolute", *dirs)
+        summary = collect_task.load_jsonl(out / "absolute" / "summary.jsonl")
+        self.assertEqual(len(summary), 2)
+        # 同点なので方式間の総合点差が gap 未満として人間レビューに回る
+        self.assertTrue(all(any("方式間の総合点差" in r for r in s["human_review"]) for s in summary))
+        comparison = json.loads((out / "absolute" / "variants.json").read_text())["comparisons"][0]
+        self.assertEqual(comparison["tasks"][0]["outcome"], "tie")
+
+    def test_waiting_until_all_variants_arrive_or_timeout(self):
+        self.add_artifact("r1", "a")
+        self.assertEqual(self.merge()["status"], "waiting")
+        # 待ち時間を過ぎても方式が 1 つしかなければ比較しない
+        self.assertEqual(self.merge(timeout_hours=1)["status"], "insufficient")
+
+    def test_timeout_compares_what_arrived_and_records_missing(self):
+        self.add_artifact("r1", "a")
+        self.add_artifact("r2", "b")
+        self.add_artifact("r3", "a", attempt=2)
+        self.assertEqual(self.merge(attempts=2)["status"], "waiting")
+        result = self.merge(attempts=2, timeout_hours=1)
+        self.assertEqual(result["status"], "timeout")
+        self.assertEqual(result["missing"], [{"variant": "b", "attempt": 2}])
+        self.assertTrue(result["pairwise"])
+
+    def test_hard_gate_failure_counts_as_arrived_but_skips_pairwise(self):
+        self.add_artifact("r1", "a")
+        self.add_artifact("r2", "b", hard_gate="fail")
+        result = self.merge()
+        self.assertEqual((result["status"], result["pairwise"], result["absolute_results"]), ("complete", False, 1))
+        out = self.root / "out"
+        invoke(aggregate, "--manifest", out / "manifest.jsonl", "--out-dir", out / "absolute",
+               *(out / "results_dirs.txt").read_text().split())
+        comparison = json.loads((out / "absolute" / "variants.json").read_text())["comparisons"][0]
+        self.assertEqual(comparison["tasks"][0]["outcome"], "a_only_passed")
+
+    def test_reruns_use_latest_artifact_and_other_tasks_or_variants_are_ignored(self):
+        self.add_artifact("r1", "a", hard_gate="fail", created="2026-11-02T09:00:00Z")
+        self.add_artifact("r1", "a", created="2026-11-02T10:00:00Z")  # 同じ Run の再実行
+        self.add_artifact("r2", "b", created="2026-11-02T10:00:00Z")
+        self.add_artifact("r3", "b", created="2026-11-02T11:00:00Z")  # 同じ枠の作り直し
+        self.add_artifact("r4", "c")
+        self.add_artifact("r5", "a", task="T2")
+        result = self.merge()
+        self.assertEqual({(p["variant"], p["run_id"], p["hard_gate"]) for p in result["present"]},
+                         {("a", "r1", "pass"), ("b", "r3", "pass")})
+        self.assertEqual(result["superseded"], ["r2"])
+        self.assertTrue(any("r4" in n for n in result["notes"]))
+
+    def test_marker_changes_when_compared_runs_change(self):
+        self.add_artifact("r1", "a")
+        self.add_artifact("r2", "b")
+        first = self.merge()["marker"]
+        self.assertEqual(self.merge()["marker"], first)
+        self.add_artifact("r3", "b", created="2026-11-02T11:00:00Z")
+        second = self.merge()["marker"]
+        self.assertNotEqual(first, second)
+        self.assertTrue(second.startswith("llm-judge-compare-T1-"))
+
+    def test_pending_tasks_skip_already_compared_and_old_tasks(self):
+        artifacts = [
+            {"name": "llm-judge-run-T1-r1", "created_at": "2026-11-02T10:00:00Z"},
+            {"name": "llm-judge-compare-T1-abc", "created_at": "2026-11-02T11:00:00Z"},
+            {"name": "llm-judge-run-T2-r2", "created_at": "2026-11-02T10:00:00Z"},
+            {"name": "llm-judge-compare-T2-abc", "created_at": "2026-11-02T09:00:00Z"},
+            {"name": "llm-judge-run-T3-r3", "created_at": "2026-11-02T10:00:00Z"},
+            {"name": "llm-judge-run-T4-r4", "created_at": "2026-10-01T10:00:00Z"},
+            {"name": "unrelated", "created_at": "2026-11-02T10:00:00Z"},
+        ]
+        since = self.NOW - collect_task.timedelta(days=14)
+        self.assertEqual(collect_task.pending_tasks(artifacts, since), ["T2", "T3"])
+
+    def test_aggregate_requires_out_dir_for_multiple_results(self):
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            aggregate.parse_args(["--manifest", "m.jsonl", "d1", "d2"])
+        args = aggregate.parse_args(["results/x", "m.jsonl"])
+        self.assertEqual((args.results_dirs, args.manifest, args.out_dir),
+                         ([Path("results/x")], Path("m.jsonl"), Path("results/x")))
+
+    def test_publish_types_filter_avoids_resending_run_events(self):
+        absolute = self.root / "absolute"
+        absolute.mkdir()
+        write_json(absolute / "run_meta.json", {"eval_id": "llm-judge-compare-T1-abc"})
+        write_jsonl(absolute / "summary.jsonl", [{"run_id": "r1", "human_review": []}])
+        write_json(absolute / "variants.json", {"variants": {"a": {}}, "comparisons": [{"a": "a", "b": "b"}]})
+        manifest = self.root / "manifest.jsonl"
+        write_jsonl(manifest, [{"run_id": "r1", "task_id": "T1", "variant": "a"}])
+        out = io.StringIO()
+        with patch.object(sys, "argv", ["publish_results.py", "--project", "shop", "--manifest", str(manifest),
+                                        "--results-dir", str(absolute), "--types", "comparison", "--dry-run"]), \
+                contextlib.redirect_stdout(out):
+            publish_results.main()
+        lines = [json.loads(l) for l in out.getvalue().splitlines() if l.startswith("{")]
+        self.assertEqual([d["type"] for d in lines], ["comparison"])
+        self.assertEqual(lines[0]["eval_id"], "llm-judge-compare-T1-abc")
+        with self.assertRaisesRegex(SystemExit, "未知の種類"):
+            publish_results.parse_types("comparison,unknown")
+
+    def test_workflows_are_wired_together(self):
+        judge = (ROOT / "ci/llm-judge.yml").read_text()
+        self.assertIn("name: llm-judge-run-${{ inputs.task_id }}-${{ inputs.run_id }}", judge)
+        self.assertIn("gh workflow run llm-judge-compare.yml", judge)
+        self.assertIn("cp -r \"$results_dir\" out/results/", judge)
+        self.assertLess(judge.index("actions/upload-artifact"), judge.index("gh workflow run llm-judge-compare.yml"))
+        compare = (ROOT / "ci/llm-judge-compare.yml").read_text()
+        for part in ("collect_task.py\" merge", "--types comparison,pairwise,pair",
+                     "name: ${{ steps.collect.outputs.marker }}", "mv compare/review/pairs/_key.json compare/pairs_key.json",
+                     "group: llm-judge-compare-${{ matrix.task_id }}"):
+            self.assertIn(part, compare)
+        # 比較済みの印は最後に残す（途中で失敗したら次の起動でやり直す）
+        self.assertGreater(compare.index("actions/upload-artifact"), compare.index("gh issue create"))
 
 
 if __name__ == "__main__":

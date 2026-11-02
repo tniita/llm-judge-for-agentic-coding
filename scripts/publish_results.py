@@ -17,6 +17,8 @@
     --pairwise-dir results/<pairwise_eval_id> --human-pair-reviews pairs_review.csv --pair-key review_pairs/_key.json
   # 送らずに中身を確認
   python scripts/publish_results.py ... --dry-run
+  # 種類を絞って送る（CI の llm-judge-compare は Run ごとの送信と重複しないよう比較の結果だけを送る）
+  python scripts/publish_results.py ... --types comparison,pairwise,pair
 
 送り先は環境変数 LLM_JUDGE_COSMOS_ENDPOINT と APPLICATIONINSIGHTS_CONNECTION_STRING（または引数）で指定する。
 片方だけでもよい。Cosmos DB は Entra ID 認証（az login 済みのユーザーか CI の OIDC）で書き込む。
@@ -223,6 +225,16 @@ def send_cosmos(endpoint: str, docs: list[dict]) -> None:
     print(f"Cosmos DB: {len(docs)} 件を保存（{COSMOS_DATABASE}/{COSMOS_CONTAINER}）")
 
 
+def parse_types(value: str | None) -> set[str] | None:
+    if not value:
+        return None
+    types = {t.strip() for t in value.split(",") if t.strip()}
+    unknown = types - EVENT_NAMES.keys()
+    if unknown:
+        raise SystemExit(f"--types に未知の種類があります: {sorted(unknown)}（指定できるもの: {sorted(EVENT_NAMES)}）")
+    return types
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--project", required=True, help="プロジェクト名（ダッシュボードでの絞り込みに使う）")
@@ -234,8 +246,10 @@ def main() -> None:
     p.add_argument("--pair-key", type=Path, help="export-pairs の _key.json（--human-pair-reviews と一緒に指定）")
     p.add_argument("--cosmos-endpoint", default=os.environ.get("LLM_JUDGE_COSMOS_ENDPOINT"))
     p.add_argument("--appinsights-connection-string", default=os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING"))
+    p.add_argument("--types", help="送る種類をカンマ区切りで絞る（例: comparison,pairwise,pair）。既定はすべて")
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
+    types = parse_types(args.types)
     if args.human_pair_reviews and not (args.pair_key and args.pairwise_dir):
         raise SystemExit("--human-pair-reviews には --pair-key と --pairwise-dir が必要です")
 
@@ -246,10 +260,15 @@ def main() -> None:
         docs += human_run_documents(args.project, manifest, args.human_reviews, now)
     if args.human_pair_reviews:
         docs += human_pair_documents(args.project, args.human_pair_reviews, args.pair_key, args.pairwise_dir, now)
+    if types is not None:
+        docs = [d for d in docs if d["type"] in types]
     if args.dry_run:
         for doc in docs:
             print(json.dumps(doc, ensure_ascii=False)[:400])
         print(f"（dry-run）{len(docs)} 件")
+        return
+    if not docs:
+        print("送る内容がありません")
         return
     if not args.cosmos_endpoint and not args.appinsights_connection_string:
         raise SystemExit("送信先がありません。LLM_JUDGE_COSMOS_ENDPOINT か APPLICATIONINSIGHTS_CONNECTION_STRING を設定してください")
