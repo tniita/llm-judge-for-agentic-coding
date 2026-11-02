@@ -2,33 +2,34 @@
 
 コーディングエージェントが既存コードを改修した PR を、Microsoft Foundry に登録した評価器（LLM Judge）で採点し、**方式どうし（例: 固定モデルと HydraFusion）の品質・合格率・コストを方式名を伏せた同じ条件で比較する**ためのキットです。CI で品質の土台を担保し、機械的に測れる指標の差分とプロジェクトの Skill（ルール）を Judge に渡して改修の「質」を評価します。迷うケースだけを人間のブラインドレビューに回し、結果は Azure の可視化基盤に集めます。
 
-まず動かしてみる場合は「[クイックスタート](#クイックスタート)」、検証実験の結果は「[検証実験](#検証実験experiments)」を参照してください。
+採点・集計・比較の本体は Python のスクリプト（[scripts/](scripts/)）で、同じものを 3 つの形で実行できます（「[実行のしかた](#実行のしかた)」）。まず動かしてみる場合は「[クイックスタート](#クイックスタート)」、検証実験の結果は「[検証実験](#検証実験experiments)」を参照してください。
 
 ## 全体の流れ
 
 ```mermaid
 flowchart LR
-  A[1. 開発・PR 作成<br>エージェントが既存コードを改修] --> CI[2. CI<br>Build・Test・Lint・CodeQL]
-  CI --> MX[metrics.py<br>共通祖先との指標の差分]
-  CI --> B{3. Hard Gate<br>CI / Hidden test}
-  B -- 不合格 --> M[対応表に記録<br>合格率・コストの集計に使う]
-  B -- 合格 --> C[make_row.py<br>匿名化・差分整形<br>+ 指標の Δ + Skill]
+  A[開発・PR 作成<br>エージェントが既存コードを改修] --> CI[CI<br>Build・Test・Lint・CodeQL]
+  CI --> MX[1. metrics.py<br>共通祖先との指標の差分]
+  CI --> B{Hard Gate<br>CI / Hidden test}
+  S[(2. プロジェクトの Skill<br>project_skills/)] --> C
+  B -- 合格 --> C[3. make_row.py<br>匿名化・差分整形<br>+ 指標の Δ + Skill]
+  B -- 不合格 --> M[3. make_row.py<br>対応表にだけ記録<br>合格率・コストの集計に使う]
   MX --> C
-  S[(プロジェクトの Skill<br>project_skills/)] --> C
   C --> D[4. run_eval.py<br>8 観点 × 3 回]
-  C --> P[run_pairwise.py<br>A/B 入れ替えのペア比較]
-  D --> E[aggregate.py<br>中央値・重み付き総合点・方式比較]
-  P --> F[pairwise_summary.json<br>順序の逆転・欠損・low confidence]
-  E --> H{人間レビューの条件に該当？}
-  F --> H
-  H -- はい --> R[人間のブラインドレビュー<br>calibration.py export --flagged]
+  D --> E[5. aggregate.py<br>中央値・重み付き総合点・方式比較]
+  C --> P[6. run_pairwise.py<br>A/B 入れ替えのペア比較]
+  E --> H{人間レビューの<br>条件に該当？}
+  P --> H
+  H -- はい --> R[7. calibration.py export --flagged<br>人間のブラインドレビュー]
   H -- いいえ --> OK[採点結果で確定]
-  R -- 最終判断 --> V
-  E --> V[5. publish_results.py<br>Cosmos DB・App Insights]
-  F --> V
+  R --> K[7. calibration.py compare<br>改善レポート → ルーブリック・Skill を改善]
+  E --> V[8. publish_results.py<br>Cosmos DB・App Insights]
+  P --> V
   M --> V
-  R --> K[calibration.py<br>改善レポート → ルーブリック・Skill を改善]
+  R -- 最終判断 --> V
 ```
+
+図の番号は「[使い方（コマンドライン）](#使い方コマンドライン)」の手順の番号です。GitHub Actions と評価サービスは、この流れの 3〜8 を自動で行います。
 
 役割分担は次のとおりです。
 
@@ -43,16 +44,28 @@ flowchart LR
 | プロジェクトのルールを守っているか | △ Lint で書けた分だけ | ✅ Skill に明記されたルールで判定 |
 | PR 説明が妥当か | ❌ | ✅ |
 
-## 前提
+## 実行のしかた
+
+| 形態 | 向いている場面 | 自動になる範囲 | 説明 |
+|---|---|---|---|
+| コマンドライン | 試す・検証実験・答え合わせ | なし（各スクリプトを順に実行する） | [使い方（コマンドライン）](#使い方コマンドライン) |
+| GitHub Actions | 評価対象のリポジトリ 1 つで、CI に組み込む | PR ごとの採点、タスクごとの方式比較、人間レビューの Issue 作成 | [GitHub Actions](#github-actions) |
+| Foundry Hosted Agent（評価サービス） | 複数のリポジトリ・CI で同じ評価基準を使う、モデル更新時に同じ条件で再評価する | 上に加え、実験 ID 単位の評価条件の固定、タスクをまたいだ比較、人間の判断の取り込み、中断からの復旧 | [Foundry Hosted Agent](#foundry-hosted-agent評価サービス) |
+
+どの形態でも、評価器・指標・集計・人間レビューの条件（「[評価の設計](#評価の設計)」）は同じです。GitHub Actions と評価サービスはテンプレート・コードの段階で、Azure へのデプロイと実行はまだしていません。
+
+## 前提とセットアップ
+
+### 前提
 
 - Foundry プロジェクト: `Foundry-Claude-tniita/proj-default`（変更は環境変数 `AZURE_AI_PROJECT_ENDPOINT`）
 - Judge: `gpt-6.1-sol`（モデルバージョン `2026-09-29` で固定チェック）。評価対象（Claude 系）と別系統にして自己選好バイアスを避けている
 - 実行ユーザーにプロジェクトの **Azure AI User** 以上のロール
 - `az login` 済みで、アクティブなサブスクリプションがプロジェクトと同じテナントにあること
 
-> Foundry の MCP ツール（`evaluator_catalog_*` など）はこのテナントではトークンのテナント不一致で失敗するため、すべて SDK（`AzureCliCredential`）経由で呼んでいます。
+> Foundry の MCP ツール（`evaluator_catalog_*` など）はこのテナントではトークンのテナント不一致で失敗するため、すべて SDK 経由で呼んでいます。資格情報は既定で Azure CLI のもの（`LLM_JUDGE_AUTH=cli`）を使い、評価サービス（Hosted Agent）ではマネージド ID（`default`）を使います（[scripts/azure_auth.py](scripts/azure_auth.py)）。
 
-## セットアップ
+### セットアップ
 
 ```bash
 az account set --subscription <subscription-id>   # Foundry プロジェクトのサブスクリプション
@@ -67,7 +80,7 @@ uv pip install --python .venv/bin/python -r requirements.txt   # radon（指標�
 
 > **Windows（PowerShell）の場合:** `.venv/bin/python` を `.venv\Scripts\python.exe` に、`export NAME=value` を `$env:NAME = "value"` に読み替えてください。行末の `\` による改行は PowerShell ではバッククォート（`` ` ``）です。
 
-## クイックスタート
+### クイックスタート
 
 セットアップ後、欠陥を仕込んだサンプル（[カナリア](#カナリアjudge-の検出力チェック)）で一連の流れを確認できます。評価対象のリポジトリは不要です。
 
@@ -79,7 +92,7 @@ uv pip install --python .venv/bin/python -r requirements.txt   # radon（指標�
 
 `<eval_id>` は `run_eval.py` の出力に表示されます。自分のリポジトリで評価するときは、次の「使い方」の 1〜5 を順に実行します。
 
-## 使い方
+## 使い方（コマンドライン）
 
 ### 1. 機械的な品質指標を計算する
 
@@ -163,11 +176,12 @@ Run ごとに [scripts/make_row.py](scripts/make_row.py) を実行します。Ju
 
 結果は `summary.jsonl`（Run ごと）と `variants.json`（方式ごと・比較）にも保存されます。
 
-Run ごとに別々に評価した結果（CI で Run ごとに `run_eval.py` を実行した場合など）は、`--manifest` と `--out-dir` を付けて複数の結果ディレクトリをまとめて集計できます。各ディレクトリの `run_meta.json` で評価条件（Judge のデプロイとモデルバージョン・評価器のバージョン・採点回数）を照合し、異なるものが混ざっていれば止めます（承知の上で集計するなら `--allow-mixed-conditions`）。照合した条件は `variants.json` の `conditions` に残ります。
+Run ごとに別々に評価した結果（CI で Run ごとに `run_eval.py` を実行した場合など）は、`--manifest` と `--out-dir` を付けて複数の結果ディレクトリをまとめて集計できます。各ディレクトリの `run_meta.json` で評価条件（Judge のデプロイとモデルバージョン・評価器のバージョン・ルーブリックのハッシュ・採点回数）を照合し、異なるものが混ざっていれば止めます（承知の上で集計するなら `--allow-mixed-conditions`）。照合した条件は `variants.json` の `conditions` に残ります。
 
 ```bash
 .venv/bin/python scripts/aggregate.py --manifest merged_manifest.jsonl --out-dir results/merged results/<eval_1> results/<eval_2>
 ```
+
 ### 6. ペア比較
 
 ```bash
@@ -218,9 +232,11 @@ export APPLICATIONINSIGHTS_CONNECTION_STRING="InstrumentationKey=...;IngestionEn
   --results-dir results/<absolute_eval_id> --pairwise-dir results/<pairwise_eval_id>
 ```
 
-対応表の全試行（Hard Gate 不合格を含む）と、`aggregate.py` / `run_pairwise.py` の結果を Cosmos DB（`llmjudge/results`、パーティションキー `/project`）に保存し、Application Insights にカスタムイベント（`LlmJudgeAttempt` / `LlmJudgeRun` / `LlmJudgeVariant` / `LlmJudgeComparison` / `LlmJudgePairwise` / `LlmJudgePair` / `LlmJudgeHumanReview`）として送ります。送信先は片方だけでも構いません。各ディレクトリの評価 ID を保持し、ペア比較には `summary.jsonl` は不要です。`LlmJudgePair` は両 Run ID と順序逆転のレビュー理由を持ち、Workbook / KQL のレビュー一覧に両 Run を表示します。`--dry-run` で送る内容を確認できます。基盤の作り方は「可視化基盤」の節を参照してください。
+対応表の全試行（Hard Gate 不合格を含む）と、`aggregate.py` / `run_pairwise.py` の結果を Cosmos DB（`llmjudge/results`、パーティションキー `/project`）に保存し、Application Insights にカスタムイベント（`LlmJudgeAttempt` / `LlmJudgeRun` / `LlmJudgeVariant` / `LlmJudgeComparison` / `LlmJudgePairwise` / `LlmJudgePair` / `LlmJudgeHumanReview`）として送ります。送信先は片方だけでも構いません。各ディレクトリの評価 ID を保持し、ペア比較には `summary.jsonl` は不要です。`LlmJudgePair` は両 Run ID と順序逆転のレビュー理由を持ち、Workbook / KQL のレビュー一覧に両 Run を表示します。`--dry-run` で送る内容を確認できます。基盤の作り方は「[可視化基盤](#可視化基盤azure)」を参照してください。
 
-## 評価器
+## 評価の設計
+
+### 評価器
 
 プロンプトは [evaluators/](evaluators/) にあり、[scripts/config.py](scripts/config.py) の `build_prompt()` が「共通の制約（[common.md](evaluators/common.md)）＋観点ごとの採点基準＋入力」を組み立てて登録します。
 
@@ -249,7 +265,7 @@ export APPLICATIONINSIGHTS_CONNECTION_STRING="InstrumentationKey=...;IngestionEn
 
 重みは暫定値です。人間との答え合わせの結果を見て [scripts/config.py](scripts/config.py) の `WEIGHTS` を調整してください。
 
-## 人間レビューに回す条件
+### 人間レビューに回す条件
 
 次のどれかに当てはまる Run は `aggregate.py` の出力で「要」になります。
 
@@ -260,7 +276,7 @@ export APPLICATIONINSIGHTS_CONNECTION_STRING="InstrumentationKey=...;IngestionEn
 - 機械的な指標の差分が閾値を超えて悪化した（[scripts/config.py](scripts/config.py) の `METRIC_THRESHOLDS`。既定は ΔV > +15、重複行 > +20、モジュール間の依存 > +5 本、ΔPC > +0.05、ΔQ < −0.05。暫定値）
 - ペア比較で、A/B の順序を入れ替えると判定が逆転した（`run_pairwise.py` の出力）
 
-## 評価の信頼性を保つ仕組み
+### 評価の信頼性を保つ仕組み
 
 | 仕組み | 内容 |
 |---|---|
@@ -269,10 +285,11 @@ export APPLICATIONINSIGHTS_CONNECTION_STRING="InstrumentationKey=...;IngestionEn
 | ブラインド化 | モデル名・方式名・会話ログは Judge に渡さない。対応表は集計時だけ使う |
 | A/B 入れ替え | ペア比較の位置バイアスを打ち消し、位置バイアスの大きさも出力する |
 | Judge バージョン固定 | 想定と違うモデルバージョンなら実行を止める。意図した更新なら `JUDGE_MODEL_VERSION` を更新するか `ALLOW_JUDGE_VERSION_CHANGE=1` |
-| 実行の記録 | `results/<eval_id>/run_meta.json` に Judge のバージョン、評価器のバージョン、日時、Run ID を残す |
+| 実行の記録 | `results/<eval_id>/run_meta.json` に Judge のバージョン、評価器のバージョン、ルーブリックのハッシュ、日時、Run ID を残す |
+| 評価条件の照合 | 別々に採点した結果をまとめるときは、Judge・評価器のバージョン・ルーブリックのハッシュ・採点回数が同じかを確かめ、違えば止める。評価サービスは実験の作成時に条件を固定し、採点の前後で照合する |
 | カナリア | 欠陥を仕込んだ差分で Judge の検出力を定期的に確認する（次節） |
 
-## カナリア（Judge の検出力チェック）
+### カナリア（Judge の検出力チェック）
 
 [datasets/canaries/](datasets/canaries/) に、欠陥を仕込んだ差分と期待する判定（[expected.json](datasets/canaries/expected.json)）があります。**ルーブリックや Judge モデルを変えたら、実データの前に必ず流して検出力が落ちていないか確かめてください。**
 
@@ -293,66 +310,9 @@ export APPLICATIONINSIGHTS_CONNECTION_STRING="InstrumentationKey=...;IngestionEn
 
 2026-10-22 時点の結果は 17/17（100%）です。
 
-## 検証実験（experiments/）
-
-実タスクでの最初の検証として、検証用リポジトリ [experiments/shoplib_base/](experiments/shoplib_base/) に 10 タスク（[experiments/tasks/](experiments/tasks/)、Hidden test は [experiments/hidden/](experiments/hidden/)）を用意し、2 方式のコーディングエージェントに解かせて評価しました。HydraFusion の実行環境が無いため、方式は Claude Code + `claude-sonnet-5-5`（`sonnet-single`）と Claude Code + `claude-opus-5-5`（`opus-single`）で代用しています。
-
-```bash
-.venv/bin/python experiments/run_agents.py --attempts 1 --workers 4   # エージェント実行 → experiments/data/
-.venv/bin/python scripts/run_eval.py experiments/data/runs.jsonl --name shoplib-10tasks
-.venv/bin/python scripts/aggregate.py results/<eval_id> experiments/data/manifest.jsonl
-.venv/bin/python scripts/run_pairwise.py experiments/data/runs.jsonl experiments/data/manifest.jsonl --repeats 2
-```
-
-エージェントが使えるのはファイル操作と、venv の pytest / ruff の実行だけです（それ以外のコマンドは拒否されます）。
-
-### 結果（2026-10-22、各方式 10 タスク × 1 回）
-
-Judge は `gpt-6.1-sol`（`2026-09-29`）です。絶対評価は 3 回採点（[eval_486c…](results/eval_486c5635e38a4d768d9ef2fddfb8a692/)）、ペア比較は A/B 入れ替え × 2 回（[eval_0c63…](results/eval_0c63f1696c2b4124833c8e72535d568b/)）です。
-
-| 項目 | `opus-single` | `sonnet-single` |
-|---|---|---|
-| Hard Gate 合格率 | 100%（10/10） | 100%（10/10） |
-| 平均総合点（0〜100） | 94.1 | 92.0 |
-| 要件の充足率 | 98.3% | 98.3% |
-| 重大問題の発生率 | 0% | 0% |
-| テストの妥当性 / 堅牢性 / 説明（0〜5） | 4.9 / 4.2 / 4.6 | 4.1 / 4.4 / 4.8 |
-| 要件充足度・設計・保守性・変更の適切さ（0〜5） | 4.8・5.0・4.8・4.7 | 4.8・5.0・4.8・4.7 |
-| 1 試行あたりのコスト | $0.31 | $0.09 |
-| 1 試行あたりのトークン（入力 / 出力） | 116k / 10.7k | 51k / 6.4k |
-| 1 試行あたりの所要時間 | 145 秒 | 64 秒 |
-
-| 方式どうしの比較 | `opus-single` の勝ち | `sonnet-single` の勝ち | 引き分け | 符号検定の p 値 |
-|---|---|---|---|---|
-| 絶対評価（総合点） | 7 | 1 | 2 | 0.070 |
-| ペア比較 | 9 | 1 | 0 | 0.021 |
-
-読み取れること:
-
-- **天井効果:** 両方式とも合格率 100%、要件の充足率 98% で、総合点の差は平均 2.1 点しかありません。タスクが易しく、差がつきにくい条件でした。方式の差を見るには、難しいタスクを加えて 20 タスク以上 × 複数回の生成で再評価する必要があります
-- **差はテストの妥当性に集中:** 観点別では、テストの妥当性（4.9 対 4.1）以外はほぼ同点でした
-- **コストと品質のトレードオフ:** `opus-single` はペア比較で優位でした（p = 0.021、位置バイアス 0.05、順序の逆転なし）。一方で、コストは約 3.3 倍、所要時間は約 2.3 倍かかっています
-- **人間レビュー:** 集計は `--gap 15` で行ったため、方式間の総合点差がすべての組で 15 未満となり、全 20 Run が人間レビュー対象になりました（うち 5 Run は試行間の差 2 点以上にも該当）。Judge の判断が人間と一致するかは未確認なので、上の優劣は暫定です
-- **指標・Skill は未使用:** 実験データは `metrics.py` と Skill の機能を追加する前に作成したため、`metrics_delta` と `project_skills` を含みません（`variants.json` の指標の差分はすべて `null`）。含めて評価するには、`run_agents.py` が呼ぶ `make_row.py` に `--metrics` / `--skills` を渡すよう変更し、データを作り直す必要があります
-
-### 人間による答え合わせ（未実施）
-
-採点資料は [experiments/review/](experiments/review/) にあります。方式名と Judge の点数は載せていません。
-
-1. **ペア比較（優先）:** [experiments/review/pairs/](experiments/review/pairs/) の `Q01.md`〜`Q10.md` を読み、[pairs_review.csv](experiments/review/pairs_review.csv) の `better` 列に `A` / `B` / `same` を入れる
-2. **絶対評価:** [experiments/review/runs/](experiments/review/runs/) の 10 件を読み、[review.csv](experiments/review/review.csv) に観点ごとの点数（0〜5）と `uncaught_critical`（1=問題なし / 0=問題あり）を入れる。採点基準は [evaluators/](evaluators/) と同じ
-3. 採点が終わったら突き合わせる。`pairs/_key.json` は採点が終わるまで開かない
-
-```bash
-.venv/bin/python scripts/calibration.py compare-pairs experiments/review/pairs_review.csv \
-  experiments/review/pairs/_key.json results/eval_0c63f1696c2b4124833c8e72535d568b
-.venv/bin/python scripts/calibration.py compare experiments/review/review.csv \
-  results/eval_486c5635e38a4d768d9ef2fddfb8a692/summary.jsonl
-```
-
 ## GitHub Actions
 
-[ci/llm-judge.yml](ci/llm-judge.yml)（Run ごと）と [ci/llm-judge-compare.yml](ci/llm-judge-compare.yml)（タスクごとの方式比較）はテンプレートです（未実行）。評価対象のリポジトリにこのキットを `tools/llm-judge/` として置き、ワークフローを `.github/workflows/` にコピーして使います。
+[ci/llm-judge.yml](ci/llm-judge.yml)（Run ごと）と [ci/llm-judge-compare.yml](ci/llm-judge-compare.yml)（タスクごとの方式比較）はテンプレートです（未実行）。評価対象のリポジトリにこのキットを `tools/llm-judge/` として置き、ワークフローを `.github/workflows/` にコピーして使います。評価サービス（[Foundry Hosted Agent](#foundry-hosted-agent評価サービス)）を使う場合は、`llm-judge.yml` が評価データを作ってサービスに登録するだけになり、`llm-judge-compare.yml` は不要です（「[GitHub Actions から使う](#github-actions-から使う)」）。
 
 ### Run ごと（llm-judge.yml）
 
@@ -370,24 +330,27 @@ Judge は `gpt-6.1-sol`（`2026-09-29`）です。絶対評価は 3 回採点（
 
 ```mermaid
 flowchart TD
-  T[llm-judge.yml の終了時 / 6 時間ごと] --> C{同じタスクの<br>方式 × attempt が揃った？}
-  C -- まだ --> X[何もしない]
-  C -- 揃った / 待ち時間切れ --> D{比較済み？<br>同じ Run の組の成果物がある}
+  T[llm-judge.yml の終了時 / 6 時間ごと] --> C{同じタスクの<br>方式 × attempt が揃った？<br>採点失敗は数えない}
+  C -- まだ・比較できる方式が 2 つ未満 --> X[何もしない]
+  C -- 揃った / 待ち時間切れ --> K{評価条件が<br>すべての Run で同じ？}
+  K -- いいえ --> W[比較せず警告<br>condition_mismatch]
+  K -- はい --> D{比較済み？<br>同じ内容・条件の<br>比較済みの印がある}
   D -- はい --> X
   D -- いいえ --> Q{両方式とも Hard Gate<br>合格の組がある？}
   Q -- はい --> PW[run_pairwise.py]
   Q -- いいえ --> AG
   PW --> AG[aggregate.py<br>Run ごとの結果をまとめて総合点差・勝敗]
+  AG --> P[比較の結果だけを可視化基盤へ<br>LLM_JUDGE_PROJECT 設定時]
   AG --> R{人間レビューの条件？<br>逆転・欠損・low confidence・差が gap 未満}
-  R -- はい --> I[レビュー用リポジトリに資料と Issue]
-  R --> P[比較の結果だけを可視化基盤へ]
-  I --> M[成果物 llm-judge-compare-* を残す<br>＝比較済みの印]
-  P --> M
+  R -- はい --> I[レビュー用リポジトリに資料と Issue<br>LLM_JUDGE_REVIEW_REPO 設定時]
+  P --> M[成果物 llm-judge-compare-* を残す<br>＝比較済みの印]
+  I --> M
+  R -- いいえ --> M
 ```
 
 - **揃ったかの判定:** `scripts/collect_task.py` が成果物 `llm-judge-run-<task_id>-*` を集め、`LLM_JUDGE_COMPARE_VARIANTS` × `LLM_JUDGE_COMPARE_ATTEMPTS` の Run が揃ったかを見る。Run は「採点済み」（採点結果と `run_meta.json` あり）・「Hard Gate 不合格」・「採点失敗」（合格したが採点結果がない）に分け、前の 2 つだけを「揃った」に数える。採点失敗の Run は `llm-judge.yml` を再実行すれば揃う。同じ Run の再実行は最新の成果物を、同じ方式・attempt に複数の Run があれば最新の Run を使う
 - **待ち時間:** 最初の Run から `LLM_JUDGE_COMPARE_TIMEOUT_HOURS`（既定 24 時間）を過ぎたら、揃った分だけで比較し、未提出と採点失敗を `collect.json` に記録する。比較できる方式が 2 つ未満なら比較しない
-- **評価条件の照合:** Judge のデプロイとモデルバージョン・評価器のバージョン・採点回数が異なる Run があれば `condition_mismatch` として比較せず、警告を出す。同じ条件で `llm-judge.yml` を再実行して揃える
+- **評価条件の照合:** Judge のデプロイとモデルバージョン・評価器のバージョン・ルーブリックのハッシュ・採点回数が異なる Run があれば `condition_mismatch` として比較せず、警告を出す。同じ条件で `llm-judge.yml` を再実行して揃える
 - **二重実行の防止:** タスクごとの `concurrency` と、比較済みの印の成果物（`llm-judge-compare-<task_id>-<ハッシュ>`）で、同じ内容を二度比較しない。ハッシュは、比較に使う Run の中身（対応表・評価データ・採点結果）と評価条件、比較側の条件（gap・ペア比較の回数・ペア比較の Judge と評価プロンプト）から作る。Run が増えた、同じ Run を採点し直した、条件を変えた場合はハッシュが変わり、比較し直す。途中で失敗した場合は印を残さず、次の起動でやり直す
 - **取りこぼしの拾い直し:** 6 時間ごとに、直近 `LLM_JUDGE_COMPARE_LOOKBACK_DAYS`（既定 14 日）に Run の成果物があり、まだ比較していないタスクを処理する
 - **人間レビュー:** `LLM_JUDGE_REVIEW_REPO`（owner/name）と、そのリポジトリに Contents / Issues の書き込み権限を持つ GitHub App（`LLM_JUDGE_REVIEW_APP_ID` とシークレット `LLM_JUDGE_REVIEW_APP_PRIVATE_KEY`）を設定すると、方式名を伏せた資料（`calibration.py export-pairs --flagged` / `export --flagged`）を `reviews/<task_id>/<成果物名>/` に置いて Issue を作る。ペア比較の対応表（`pairs_key.json`）は比較の成果物にだけ残す。レビュー用リポジトリは評価対象とは別の非公開リポジトリにし、レビュアーには評価対象リポジトリの Actions を見せない。埋めたシートは、比較の成果物の `pairwise/` と `pairs_key.json` を使って `publish_results.py --human-pair-reviews` / `--human-reviews` で送る
@@ -398,6 +361,21 @@ flowchart TD
 ## Foundry Hosted Agent（評価サービス）
 
 [hosted/](hosted/) は、上の 2 つのワークフローが行う処理（採点・タスクごとの方式比較・人間レビューの振り分け）を、**実験 ID 単位の評価サービス**として Foundry の Hosted Agent（Invocations プロトコル）に載せたものです。コードとローカルでの動作確認までで、Azure へのデプロイはしていません。
+
+```mermaid
+flowchart LR
+  CI[CI / 手元<br>make_row.py まで] -->|submit_run| S
+  OPS[運用者] -->|report / rejudge_experiment| S
+  R1[Foundry ルーチン<br>3 時間ごと] -->|sweep| S
+  R2[Foundry ルーチン<br>Issue が閉じられた] -->|ingest_reviews| S
+  S[評価サービス<br>Foundry Hosted Agent] --> J[採点<br>登録済みの評価器<br>実験の評価条件で照合]
+  J -->|採点が終わるたび| CMP[タスクの方式比較]
+  S --- DB[(Cosmos DB<br>実験・Run・比較・ジョブ)]
+  CMP -->|要レビュー| RV[レビュー用リポジトリ<br>資料と Issue]
+  RV -. Issue を閉じる .-> R2
+  CMP --> V[可視化基盤<br>届くまで送り直す]
+  J --> V
+```
 
 GitHub Actions 版との違いは次のとおりです。
 
@@ -527,7 +505,66 @@ az monitor app-insights component show -g rg-llm-judge -a <出力の appInsights
 - トークン計測をディメンション付きで見るには、Application Insights の「使用量と推定コスト」で**カスタム メトリックのディメンションでのアラートを有効化**してください（Bicep では設定できません）
 - CI の OIDC 用アプリにも Cosmos DB に書き込ませる場合は、そのサービス プリンシパルの objectId を `dataContributorPrincipalIds` に加えます
 
-## 修正の回帰テスト
+## 検証実験（experiments/）
+
+実タスクでの最初の検証として、検証用リポジトリ [experiments/shoplib_base/](experiments/shoplib_base/) に 10 タスク（[experiments/tasks/](experiments/tasks/)、Hidden test は [experiments/hidden/](experiments/hidden/)）を用意し、2 方式のコーディングエージェントに解かせて評価しました。HydraFusion の実行環境が無いため、方式は Claude Code + `claude-sonnet-5-5`（`sonnet-single`）と Claude Code + `claude-opus-5-5`（`opus-single`）で代用しています。
+
+```bash
+.venv/bin/python experiments/run_agents.py --attempts 1 --workers 4   # エージェント実行 → experiments/data/
+.venv/bin/python scripts/run_eval.py experiments/data/runs.jsonl --name shoplib-10tasks
+.venv/bin/python scripts/aggregate.py results/<eval_id> experiments/data/manifest.jsonl
+.venv/bin/python scripts/run_pairwise.py experiments/data/runs.jsonl experiments/data/manifest.jsonl --repeats 2
+```
+
+エージェントが使えるのはファイル操作と、venv の pytest / ruff の実行だけです（それ以外のコマンドは拒否されます）。
+
+### 結果（2026-10-22、各方式 10 タスク × 1 回）
+
+Judge は `gpt-6.1-sol`（`2026-09-29`）です。絶対評価は 3 回採点（[eval_486c…](results/eval_486c5635e38a4d768d9ef2fddfb8a692/)）、ペア比較は A/B 入れ替え × 2 回（[eval_0c63…](results/eval_0c63f1696c2b4124833c8e72535d568b/)）です。
+
+| 項目 | `opus-single` | `sonnet-single` |
+|---|---|---|
+| Hard Gate 合格率 | 100%（10/10） | 100%（10/10） |
+| 平均総合点（0〜100） | 94.1 | 92.0 |
+| 要件の充足率 | 98.3% | 98.3% |
+| 重大問題の発生率 | 0% | 0% |
+| テストの妥当性 / 堅牢性 / 説明（0〜5） | 4.9 / 4.2 / 4.6 | 4.1 / 4.4 / 4.8 |
+| 要件充足度・設計・保守性・変更の適切さ（0〜5） | 4.8・5.0・4.8・4.7 | 4.8・5.0・4.8・4.7 |
+| 1 試行あたりのコスト | $0.31 | $0.09 |
+| 1 試行あたりのトークン（入力 / 出力） | 116k / 10.7k | 51k / 6.4k |
+| 1 試行あたりの所要時間 | 145 秒 | 64 秒 |
+
+| 方式どうしの比較 | `opus-single` の勝ち | `sonnet-single` の勝ち | 引き分け | 符号検定の p 値 |
+|---|---|---|---|---|
+| 絶対評価（総合点） | 7 | 1 | 2 | 0.070 |
+| ペア比較 | 9 | 1 | 0 | 0.021 |
+
+読み取れること:
+
+- **天井効果:** 両方式とも合格率 100%、要件の充足率 98% で、総合点の差は平均 2.1 点しかありません。タスクが易しく、差がつきにくい条件でした。方式の差を見るには、難しいタスクを加えて 20 タスク以上 × 複数回の生成で再評価する必要があります
+- **差はテストの妥当性に集中:** 観点別では、テストの妥当性（4.9 対 4.1）以外はほぼ同点でした
+- **コストと品質のトレードオフ:** `opus-single` はペア比較で優位でした（p = 0.021、位置バイアス 0.05、順序の逆転なし）。一方で、コストは約 3.3 倍、所要時間は約 2.3 倍かかっています
+- **人間レビュー:** 集計は `--gap 15` で行ったため、方式間の総合点差がすべての組で 15 未満となり、全 20 Run が人間レビュー対象になりました（うち 5 Run は試行間の差 2 点以上にも該当）。Judge の判断が人間と一致するかは未確認なので、上の優劣は暫定です
+- **指標・Skill は未使用:** 実験データは `metrics.py` と Skill の機能を追加する前に作成したため、`metrics_delta` と `project_skills` を含みません（`variants.json` の指標の差分はすべて `null`）。含めて評価するには、`run_agents.py` が呼ぶ `make_row.py` に `--metrics` / `--skills` を渡すよう変更し、データを作り直す必要があります
+
+### 人間による答え合わせ（未実施）
+
+採点資料は [experiments/review/](experiments/review/) にあります。方式名と Judge の点数は載せていません。
+
+1. **ペア比較（優先）:** [experiments/review/pairs/](experiments/review/pairs/) の `Q01.md`〜`Q10.md` を読み、[pairs_review.csv](experiments/review/pairs_review.csv) の `better` 列に `A` / `B` / `same` を入れる
+2. **絶対評価:** [experiments/review/runs/](experiments/review/runs/) の 10 件を読み、[review.csv](experiments/review/review.csv) に観点ごとの点数（0〜5）と `uncaught_critical`（1=問題なし / 0=問題あり）を入れる。採点基準は [evaluators/](evaluators/) と同じ
+3. 採点が終わったら突き合わせる。`pairs/_key.json` は採点が終わるまで開かない
+
+```bash
+.venv/bin/python scripts/calibration.py compare-pairs experiments/review/pairs_review.csv \
+  experiments/review/pairs/_key.json results/eval_0c63f1696c2b4124833c8e72535d568b
+.venv/bin/python scripts/calibration.py compare experiments/review/review.csv \
+  results/eval_486c5635e38a4d768d9ef2fddfb8a692/summary.jsonl
+```
+
+## 開発
+
+### 回帰テスト
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest discover -s tests -v
@@ -538,7 +575,9 @@ az bicep build --file infra/main.bicep --stdout > /dev/null
 
 [tests/test_hosted_service.py](tests/test_hosted_service.py) は評価サービスを、Foundry・GitHub・可視化基盤を偽物に差し替えて確認します。HTTP の入口のテストは `azure-ai-agentserver-invocations` が入っている場合だけ実行します（「ローカルで動かす」の依存を入れる）。
 
-## ファイル構成
+### ファイル構成
+
+**評価の本体**
 
 | パス | 内容 |
 |---|---|
@@ -552,20 +591,37 @@ az bicep build --file infra/main.bicep --stdout > /dev/null
 | [scripts/run_pairwise.py](scripts/run_pairwise.py) | ペア比較の実行と集計 |
 | [scripts/calibration.py](scripts/calibration.py) | 人間との答え合わせ、改善レポート、一致率の推移 |
 | [scripts/publish_results.py](scripts/publish_results.py) | 結果を Cosmos DB / Application Insights に送信 |
-| [scripts/collect_task.py](scripts/collect_task.py) | CI の Run ごとの成果物を集め、タスクの全方式が揃ったかを判定（llm-judge-compare.yml 用） |
 | [scripts/check_canaries.py](scripts/check_canaries.py) | カナリアの作成と検出力の判定 |
 | [scripts/foundry_eval.py](scripts/foundry_eval.py) | Foundry の評価 API 呼び出しと実行メタデータの記録 |
 | [scripts/stats_utils.py](scripts/stats_utils.py) | 符号検定などの統計関数 |
+| [scripts/azure_auth.py](scripts/azure_auth.py) | Azure の資格情報の選び方（`LLM_JUDGE_AUTH`: cli / default / managed_identity） |
 | [project_skills/](project_skills/) | プロジェクトの Skill のテンプレート（エージェントと Judge に渡す） |
-| [infra/](infra/) | 可視化基盤の Bicep、APIM ポリシー、Workbook、KQL |
-| [datasets/](datasets/) | サンプルデータとカナリア |
+
+**GitHub Actions**
+
+| パス | 内容 |
+|---|---|
 | [ci/llm-judge.yml](ci/llm-judge.yml) | GitHub Actions のテンプレート（Run ごとの評価） |
 | [ci/llm-judge-compare.yml](ci/llm-judge-compare.yml) | GitHub Actions のテンプレート（タスクごとの方式比較） |
+| [scripts/collect_task.py](scripts/collect_task.py) | CI の Run ごとの成果物を集め、タスクの全方式が揃ったかを判定（llm-judge-compare.yml 用） |
+
+**評価サービス（Foundry Hosted Agent）**
+
+| パス | 内容 |
+|---|---|
 | [hosted/](hosted/) | 評価サービス（Foundry Hosted Agent）。`azure.yaml`（エージェントとルーチン）、`sync_kit.py`、`src/llm-judge-service/`（`main.py` HTTP の入口・`service.py` 操作・`store.py` 状態の保存先・`adapters.py` Foundry / GitHub / 可視化基盤） |
 | [scripts/judge_client.py](scripts/judge_client.py) | 評価サービスを呼ぶクライアント（CI・手元から） |
-| [scripts/azure_auth.py](scripts/azure_auth.py) | Azure の資格情報の選び方（`LLM_JUDGE_AUTH`: cli / default / managed_identity） |
+
+**基盤・データ・検証**
+
+| パス | 内容 |
+|---|---|
+| [infra/](infra/) | 可視化基盤の Bicep、APIM ポリシー、Workbook、KQL |
+| [datasets/](datasets/) | サンプルデータとカナリア |
 | [experiments/](experiments/) | 検証実験（検証用リポジトリ・10 タスク・Hidden test・エージェント実行ハーネス・人間用の採点資料） |
 | `results/<eval_id>/` | 試行ごとの結果、`run_meta.json`、集計結果 |
+| [tests/](tests/) | 回帰テスト（「[回帰テスト](#回帰テスト)」） |
+| [pyrightconfig.json](pyrightconfig.json) | エディタ（Pylance）の解析パス。`scripts/` などを `sys.path` に足して読み込むモジュールを解決する |
 
 ## 制約と注意点
 
