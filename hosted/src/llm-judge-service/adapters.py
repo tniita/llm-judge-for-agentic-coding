@@ -66,7 +66,10 @@ class FoundryJudge:
 
 
 class Publisher:
-    """publish_results.py と同じ形で可視化基盤に送る。LLM_JUDGE_PUBLISH=1 のときだけ送る。"""
+    """publish_results.py と同じ形で可視化基盤に送る。LLM_JUDGE_PUBLISH=1 のときだけ送る。
+
+    送信先（Cosmos DB / Application Insights）ごとに送り、失敗した送信先だけをあとで送り直せるようにする。
+    """
 
     def __init__(self):
         self.enabled = os.environ.get("LLM_JUDGE_PUBLISH") == "1"
@@ -76,15 +79,19 @@ class Publisher:
         self.appinsights = (os.environ.get("LLM_JUDGE_APPINSIGHTS_CONNECTION_STRING")
                             or os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING"))
 
-    def publish(self, docs: list[dict]) -> int:
-        if not self.enabled or not docs:
-            return 0
+    def sinks(self) -> list[str]:
+        if not self.enabled:
+            return []
+        return [name for name, target in (("cosmos", self.cosmos), ("appinsights", self.appinsights)) if target]
+
+    def send(self, sink: str, docs: list[dict]) -> None:
         import publish_results
-        if self.cosmos:
+        if sink == "cosmos":
             publish_results.send_cosmos(self.cosmos, docs)
-        if self.appinsights:
+        elif sink == "appinsights":
             publish_results.send_appinsights(self.appinsights, docs)
-        return len(docs)
+        else:
+            raise ValueError(f"未知の送信先: {sink}")
 
 
 class GitHubReviewRepo:

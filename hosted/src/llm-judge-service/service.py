@@ -75,6 +75,10 @@ class ConflictError(ServiceError):
     status, code = 409, "conflict"
 
 
+class JudgeOutputError(RuntimeError):
+    """Foundry の採点結果が欠けている（採点回数が足りない・点数のない評価器がある）。採点失敗として採点し直す。"""
+
+
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -123,6 +127,38 @@ def compact_trials(results_dir: Path, key: str) -> list[list[dict]]:
             for row in load_jsonl(path)
         ])
     return trials
+
+
+def usable(result: dict) -> bool:
+    return result.get("status", "completed") == "completed" and (
+        result.get("score") is not None or result.get("passed") is not None)
+
+
+def check_trials(trials: list[list[dict]], *, key: str, repeats: int, expected: dict[str, list[str]],
+                 group=lambda item_key: item_key) -> None:
+    """採点結果がそろっているかを確かめる。
+
+    - 試行の数が採点回数と同じで、どの試行にも全項目の行がある
+    - 項目（group でまとめたもの）× 評価器ごとに、点数のある結果が 1 つ以上ある
+    一部の試行だけが失敗したものは、集計（aggregate.py / run_pairwise.py）が人間レビューに回すのでここでは通す。
+    """
+    if len(trials) != repeats:
+        raise JudgeOutputError(f"採点結果の試行が {len(trials)} 回分しかありません（{repeats} 回必要）")
+    counts: Counter = Counter()
+    for i, rows in enumerate(trials, start=1):
+        keys = {row.get("datasource_item", {}).get(key) for row in rows}
+        missing_rows = sorted(set(expected) - keys)
+        if missing_rows:
+            raise JudgeOutputError(f"試行 {i} に {missing_rows} の採点結果がありません")
+        for row in rows:
+            item = row["datasource_item"].get(key)
+            for result in row.get("results", []):
+                if usable(result):
+                    counts[(group(item), result.get("name"))] += 1
+    groups = {group(k): names for k, names in expected.items()}
+    empty = sorted(f"{g}/{n}" for g, names in groups.items() for n in names if counts[(g, n)] == 0)
+    if empty:
+        raise JudgeOutputError(f"点数のない採点結果があります: {empty}")
 
 
 def write_results(directory: Path, trials: list[list[dict]], run_meta: dict) -> Path:
@@ -290,7 +326,25 @@ class Service:
         if lock is None:
             return None
         job = self.store.get(experiment_id, lock["job_id"])
-        return job if job is not None and job["status"] in statuses else None
+        if job is None or job["status"] not in statuses:
+            return None
+        # 止まったジョブを重複判定に使うと、同じ操作が二度と始まらない（sweep 自身が止まった場合も含む）
+        if self._is_stale(job):
+            self._fail_stale(job)
+            return None
+        return job
+
+    def _is_stale(self, job: dict) -> bool:
+        last = parse_iso(job.get("heartbeat_at") or job["created_at"])
+        return job["status"] in ACTIVE and self.now() - last > self.stale_after
+
+    def _fail_stale(self, job: dict) -> None:
+        now = iso(self.now())
+        job.update(status="failed", error="中断されました（ハートビートが途絶えたか、開始されませんでした）",
+                   finished_at=now, updated_at=now)
+        self.store.upsert(job)
+        if job["op"] == "judge":
+            self._mark_judge_failed(job["experiment_id"], job["params"], job["error"])
 
     def _enqueue(self, op: str, experiment_id: str, key: str, params: dict, invocation_id: str | None = None,
                  dedupe_statuses=ACTIVE) -> tuple[dict, bool]:
@@ -340,7 +394,7 @@ class Service:
         job.update(status="running", started_at=iso(self.now()), heartbeat_at=iso(self.now()))
         self.store.upsert(job)
         stop = threading.Event()
-        beat = threading.Thread(target=self._heartbeat, args=(dict(job), stop), daemon=True)
+        beat = threading.Thread(target=self._heartbeat, args=(job["experiment_id"], job["id"], stop), daemon=True)
         if self.heartbeat_seconds > 0:
             beat.start()
         handlers = {"judge": self._run_judge, "compare_task": self._run_compare, "sweep": self._run_sweep,
@@ -359,10 +413,14 @@ class Service:
         job.update(status=status, result=result, error=error, finished_at=now, updated_at=now, heartbeat_at=now)
         self.store.upsert(job)
 
-    def _heartbeat(self, job: dict, stop: threading.Event) -> None:
+    def _heartbeat(self, experiment_id: str, job_doc_id: str, stop: threading.Event) -> None:
         while not stop.wait(self.heartbeat_seconds):
-            job.update(heartbeat_at=iso(self.now()), updated_at=iso(self.now()))
-            self.store.upsert(job)
+            current = self.store.get(experiment_id, job_doc_id)
+            # 片付けられた（failed になった）ジョブを running に戻さない
+            if current is None or current["status"] != "running":
+                return
+            current.update(heartbeat_at=iso(self.now()), updated_at=iso(self.now()))
+            self.store.upsert(current)
 
     # ------------------------------------------------------------------ Run の登録と採点
 
@@ -399,7 +457,10 @@ class Service:
         existing = self.store.get(eid, doc_id)
         if existing and existing["input_hash"] == input_hash:
             if existing["state"] in ("judged", "gate_failed"):
-                return 200, {"run_id": run_id, "state": existing["state"], "status": "completed", "deduplicated": True}
+                # 採点は済んでいても、可視化基盤への送信が残っていれば送り直す
+                publish = self._deliver(eid, doc_id) if existing.get("publish_status") == "pending" else None
+                return 200, {"run_id": run_id, "state": existing["state"], "status": "completed", "deduplicated": True,
+                             "published": publish or self._publish_view(existing)}
             active = self._active_job(eid, f"judge:{run_id}:{input_hash}")
             if active is not None:
                 return 202, {"invocation_id": active["invocation_id"], "op": "judge", "run_id": run_id,
@@ -410,12 +471,16 @@ class Service:
                "input_hash": input_hash, "state": "gate_failed" if hard_gate == "fail" else "queued",
                "submitted_at": (existing or {}).get("submitted_at") or now, "updated_at": now,
                "retries": (existing or {}).get("retries", 0) if existing and existing["input_hash"] == input_hash else 0,
-               "eval_id": None, "run_meta": None, "trials": None, "summary": None, "error": None}
+               "eval_id": None, "run_meta": None, "trials": None, "summary": None, "error": None,
+               "publish": None, "publish_status": None}
+        if hard_gate == "fail":
+            self._stage_publish(run, exp, publish_results.build_documents(d["project"], [manifest], None), {"attempt"})
         self.store.upsert(run)
         if hard_gate == "fail":
-            self._publish(exp, publish_results.build_documents(d["project"], [manifest], None), {"attempt"})
+            published = self._deliver(eid, doc_id)
             self._spawn_compare(eid, task_id)
-            return 200, {"run_id": run_id, "state": "gate_failed", "status": "completed", "deduplicated": False}
+            return 200, {"run_id": run_id, "state": "gate_failed", "status": "completed", "deduplicated": False,
+                         "published": published}
         job, _ = self._enqueue("judge", eid, f"judge:{run_id}:{input_hash}",
                                {"run_id": run_id, "input_hash": input_hash}, invocation_id)
         return 202, {"invocation_id": job["invocation_id"], "op": "judge", "run_id": run_id,
@@ -442,6 +507,8 @@ class Service:
         self._verify_results(results_dir, exp, absolute=True)
         run_meta = json.loads((results_dir / "run_meta.json").read_text(encoding="utf-8"))
         trials = compact_trials(results_dir, "run_id")
+        check_trials(trials, key="run_id", repeats=exp["definition"]["judge_repeats"],
+                     expected={run["run_id"]: list(config.EVALUATORS)})
         with tempfile.TemporaryDirectory(prefix="llm-judge-") as tmp:
             tmp = Path(tmp)
             results = write_results(tmp / "results" / run_meta["eval_id"], trials, run_meta)
@@ -458,8 +525,10 @@ class Service:
             return {"status": "superseded", "message": "採点中に同じ Run の新しい内容が登録されました"}
         latest.update(state="judged", eval_id=run_meta["eval_id"], run_meta=run_meta, trials=trials,
                       summary=summary, error=None, judged_at=iso(self.now()), updated_at=iso(self.now()))
+        # 送る内容を採点結果と同じ文書に保存してから送る（送信に失敗しても sweep と再登録で送り直せる）
+        self._stage_publish(latest, exp, docs, {"attempt", "run"})
         self.store.upsert(latest)
-        published = self._publish(exp, docs, {"attempt", "run"})
+        published = self._deliver(eid, latest["id"])
         self._spawn_compare(eid, latest["task_id"])
         return {"status": "judged", "run_id": latest["run_id"], "eval_id": run_meta["eval_id"],
                 "total": (summary or {}).get("total"), "human_review": (summary or {}).get("human_review"),
@@ -524,7 +593,9 @@ class Service:
             task.update(marker=collect["marker"], markers=[*task["markers"], collect["marker"]][-20:],
                         compared_at=iso(self.now()), absolute=result.pop("absolute"),
                         pairwise=result.pop("pairwise"), review_id=result.get("review_id"))
+            self._stage_publish(task, exp, result.pop("docs"), {"comparison", "pairwise", "pair"})
             self.store.upsert(task)
+            result["published"] = self._deliver(eid, task["id"])
             return {"task_id": task_id, "status": "compared", "collect_status": collect["status"], **result}
 
     def _compare_ready(self, exp: dict, task_id: str, collect: dict, out: Path, tmp: Path) -> dict:
@@ -539,11 +610,16 @@ class Service:
                                                   repeats=d["pairwise_repeats"])
             write_json(pairwise_dir / "pairs.json", pairs)
             self._verify_results(pairwise_dir, exp, absolute=False)
+            pair_trials = compact_trials(pairwise_dir, "pair_key")
+            # 片方の順序だけの欠けは run_pairwise.aggregate が人間レビューに回す。組ごとに点数が 1 つもなければ失敗
+            check_trials(pair_trials, key="pair_key", repeats=d["pairwise_repeats"],
+                         expected={f"{p['pair_id']}-{o}": ["pairwise"] for p in pairs for o in ("1", "2")},
+                         group=lambda item_key: item_key.rsplit("-", 1)[0])
             quiet(run_pairwise.aggregate, pairwise_dir, pairs)
             pairwise = {"pairs": pairs,
                         "summary": json.loads((pairwise_dir / "pairwise_summary.json").read_text(encoding="utf-8")),
                         "run_meta": json.loads((pairwise_dir / "run_meta.json").read_text(encoding="utf-8")),
-                        "trials": compact_trials(pairwise_dir, "pair_key")}
+                        "trials": pair_trials}
 
         absolute_dir = out / "absolute"
         results_dirs = (out / "results_dirs.txt").read_text(encoding="utf-8").split()
@@ -556,12 +632,10 @@ class Service:
         review = self._build_review(exp, task_id, collect["marker"], dataset_rows, summary_rows, pairwise,
                                     pairwise_dir, tmp)
         docs = publish_results.build_documents(d["project"], manifest_rows, absolute_dir, pairwise_dir)
-        published = self._publish(exp, docs, {"comparison", "pairwise", "pair"})
         return {"marker": collect["marker"], "pairwise_eval_id": (pairwise or {}).get("run_meta", {}).get("eval_id"),
                 "review_id": review and review["id"], "review_issue": review and review.get("issue_url"),
                 "human_review": {"pairs": review["pairs"] if review else 0, "runs": review["runs"] if review else 0},
-                "published": published,
-                "absolute": {"summary": summary_rows, "variants": variants}, "pairwise": pairwise}
+                "docs": docs, "absolute": {"summary": summary_rows, "variants": variants}, "pairwise": pairwise}
 
     # ------------------------------------------------------------------ 人間レビュー
 
@@ -675,9 +749,11 @@ class Service:
                                              "better", "scores", "uncaught_critical", "comment")} for d in docs]
         previous = review.get("status")
         review.update(decisions=decisions, status="ingested" if decisions else "empty", ingested_at=now)
+        if decisions:
+            self._stage_publish(review, exp, docs, {"human_review"})
         self.store.upsert(review)
         if decisions:
-            self._publish(exp, docs, {"human_review"})
+            self._deliver(eid, review["id"])
             self.review_repo.comment(review["issue_number"], f"llm-judge: {len(decisions)} 件の判断を取り込みました。")
         elif previous != "empty":
             self.review_repo.comment(review["issue_number"], "llm-judge: 記入された判断が見つかりませんでした。"
@@ -690,21 +766,15 @@ class Service:
         experiments = ([self._experiment(job["experiment_id"])] if job["experiment_id"] != SERVICE_PARTITION
                        else [e for e in self.store.query("experiment") if e.get("status") == "active"])
         now, summary = self.now(), {}
+        # 止まったジョブは実験をまたいで（_service の sweep / ingest_reviews も含めて）片付ける
+        stale = Counter()
+        for status in ACTIVE:
+            for other in self.store.query("job", None, status=status):
+                if other["id"] != job["id"] and self._is_stale(other):
+                    self._fail_stale(other)
+                    stale[other["experiment_id"]] += 1
         for exp in experiments:
             eid = exp["experiment_id"]
-            stale = 0
-            for status in ACTIVE:
-                for other in self.store.query("job", eid, status=status):
-                    if other["id"] == job["id"] or other["op"] == "sweep":
-                        continue
-                    last = parse_iso(other.get("heartbeat_at") or other["created_at"])
-                    if now - last > self.stale_after:
-                        other.update(status="failed", error="中断されました（ハートビートが途絶えたか、開始されませんでした）",
-                                     finished_at=iso(now))
-                        self.store.upsert(other)
-                        if other["op"] == "judge":
-                            self._mark_judge_failed(eid, other["params"], other["error"])
-                        stale += 1
             retried = 0
             for run in self.store.query("run", eid, state="judge_failed"):
                 if run.get("retries", 0) >= self.max_judge_retries:
@@ -717,9 +787,16 @@ class Service:
             tasks = sorted({r["task_id"] for r in self.store.query("run", eid)})
             for task_id in tasks:
                 self._spawn_compare(eid, task_id)
-            summary[eid] = {"stale_jobs": stale, "retried_runs": retried, "compare_tasks": len(tasks)}
+            delivered = pending = 0
+            for kind in ("run", "task", "review"):
+                for doc in self.store.query(kind, eid, publish_status="pending"):
+                    result = self._deliver(eid, doc["id"])
+                    delivered += result["status"] == "sent"
+                    pending += result["status"] == "pending"
+            summary[eid] = {"stale_jobs": stale.pop(eid, 0), "retried_runs": retried, "compare_tasks": len(tasks),
+                            "publish_delivered": delivered, "publish_pending": pending}
         ingest = self._run_ingest(job) if self.review_repo is not None else None
-        return {"experiments": summary, "reviews": ingest}
+        return {"experiments": summary, "stale_jobs_elsewhere": sum(stale.values()), "reviews": ingest}
 
     def _run_rejudge(self, job: dict) -> dict:
         target = self._experiment(job["experiment_id"])
@@ -803,11 +880,45 @@ class Service:
 
     # ------------------------------------------------------------------ 可視化基盤
 
-    def _publish(self, exp: dict, docs: list[dict], types: set[str]) -> int:
-        if self.publisher is None:
-            return 0
-        selected = [{**doc, "experiment_id": exp["experiment_id"]} for doc in docs if doc["type"] in types]
-        return self.publisher.publish(selected)
+    def _stage_publish(self, doc: dict, exp: dict, docs: list[dict], types: set[str]) -> None:
+        """可視化基盤に送る内容と送信先を、元の文書（Run・タスク・レビュー）に保存する。送るのは _deliver。
+
+        文書の ID と Run の人間レビューの結合キーは実験ごとに分ける（同じ Run を別の実験で採点し直しても上書きしない）。
+        """
+        sinks = self.publisher.sinks() if self.publisher is not None else []
+        selected = publish_results.scope_documents([d for d in docs if d["type"] in types], exp["experiment_id"])
+        if not sinks or not selected:
+            doc.update(publish=None, publish_status=None)
+            return
+        doc.update(publish={"docs": selected, "pending": list(sinks), "attempts": 0, "errors": None,
+                            "staged_at": iso(self.now()), "sent_at": None}, publish_status="pending")
+
+    def _deliver(self, experiment_id: str, doc_id: str) -> dict:
+        """保存した内容を、まだ届いていない送信先にだけ送る。失敗しても例外にせず、次の sweep で送り直す。"""
+        doc = self.store.get(experiment_id, doc_id)
+        if doc is None or not doc.get("publish"):
+            return {"status": "disabled"}
+        publish = doc["publish"]
+        errors = {}
+        for sink in list(publish["pending"]):
+            try:
+                self.publisher.send(sink, publish["docs"])
+                publish["pending"].remove(sink)
+            except Exception as exc:  # noqa: BLE001 — 送信先ごとに記録して送り直す
+                errors[sink] = f"{type(exc).__name__}: {exc}"[:1000]
+        publish.update(attempts=publish["attempts"] + 1, errors=errors or None,
+                       sent_at=None if publish["pending"] else iso(self.now()))
+        doc.update(publish=publish, publish_status="pending" if publish["pending"] else "sent")
+        self.store.upsert(doc)
+        return self._publish_view(doc)
+
+    @staticmethod
+    def _publish_view(doc: dict) -> dict:
+        publish = doc.get("publish")
+        if not publish:
+            return {"status": "disabled"}
+        return {"status": doc["publish_status"], "documents": len(publish["docs"]), "pending": publish["pending"],
+                "attempts": publish["attempts"], "errors": publish["errors"]}
 
 
 OPENAPI_SPEC = {
