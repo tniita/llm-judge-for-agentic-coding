@@ -14,6 +14,7 @@ import os
 import re
 import threading
 from pathlib import Path
+from typing import Any
 
 
 class Conflict(Exception):
@@ -55,7 +56,7 @@ class FileStore(Store):
     def _path(self, experiment_id: str, doc_id: str) -> Path:
         return self.root / self._safe(experiment_id) / f"{self._safe(doc_id)}.json"
 
-    def get(self, experiment_id, doc_id):
+    def get(self, experiment_id: str, doc_id: str) -> dict | None:
         path = self._path(experiment_id, doc_id)
         with self._lock:
             return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
@@ -68,13 +69,13 @@ class FileStore(Store):
         os.replace(tmp, path)
         return doc
 
-    def create(self, doc):
+    def create(self, doc: dict) -> dict:
         with self._lock:
             if self._path(doc["experiment_id"], doc["id"]).exists():
                 raise Conflict(doc["id"])
             return self._write(doc)
 
-    def upsert(self, doc):
+    def upsert(self, doc: dict) -> dict:
         with self._lock:
             return self._write(doc)
 
@@ -84,12 +85,12 @@ class FileStore(Store):
             for path in sorted(d.glob("*.json")):
                 yield json.loads(path.read_text(encoding="utf-8"))
 
-    def query(self, kind, experiment_id=None, **equals):
+    def query(self, kind: str, experiment_id: str | None = None, **equals) -> list[dict]:
         with self._lock:
             return [d for d in self._all(experiment_id)
                     if d.get("kind") == kind and all(d.get(k) == v for k, v in equals.items())]
 
-    def find(self, doc_id):
+    def find(self, doc_id: str) -> dict | None:
         with self._lock:
             return next((d for d in self._all(None) if d.get("id") == doc_id), None)
 
@@ -102,29 +103,29 @@ class CosmosStore(Store):
             .get_database_client(database).get_container_client(container)
 
     @staticmethod
-    def _clean(doc: dict | None) -> dict | None:
-        return None if doc is None else {k: v for k, v in doc.items() if k not in SYSTEM_FIELDS}
+    def _clean(doc: dict) -> dict:
+        return {k: v for k, v in doc.items() if k not in SYSTEM_FIELDS}
 
-    def get(self, experiment_id, doc_id):
+    def get(self, experiment_id: str, doc_id: str) -> dict | None:
         from azure.cosmos.exceptions import CosmosResourceNotFoundError
         try:
             return self._clean(self._container.read_item(doc_id, partition_key=experiment_id))
         except CosmosResourceNotFoundError:
             return None
 
-    def create(self, doc):
+    def create(self, doc: dict) -> dict:
         from azure.cosmos.exceptions import CosmosResourceExistsError
         try:
             return self._clean(self._container.create_item(doc))
         except CosmosResourceExistsError as exc:
             raise Conflict(doc["id"]) from exc
 
-    def upsert(self, doc):
+    def upsert(self, doc: dict) -> dict:
         return self._clean(self._container.upsert_item(doc))
 
-    def query(self, kind, experiment_id=None, **equals):
+    def query(self, kind: str, experiment_id: str | None = None, **equals) -> list[dict]:
         clauses = ["c.kind = @kind"]
-        params = [{"name": "@kind", "value": kind}]
+        params: list[dict[str, Any]] = [{"name": "@kind", "value": kind}]
         for i, (key, value) in enumerate(equals.items()):
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
                 raise ValueError(f"不正なフィールド名: {key}")
@@ -137,10 +138,10 @@ class CosmosStore(Store):
             items = self._container.query_items(sql, parameters=params, partition_key=experiment_id)
         return [self._clean(d) for d in items]
 
-    def find(self, doc_id):
+    def find(self, doc_id: str) -> dict | None:
+        params: list[dict[str, Any]] = [{"name": "@id", "value": doc_id}]
         items = list(self._container.query_items(
-            "SELECT * FROM c WHERE c.id = @id", parameters=[{"name": "@id", "value": doc_id}],
-            enable_cross_partition_query=True))
+            "SELECT * FROM c WHERE c.id = @id", parameters=params, enable_cross_partition_query=True))
         return self._clean(items[0]) if items else None
 
 

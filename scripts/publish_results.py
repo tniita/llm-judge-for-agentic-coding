@@ -154,6 +154,24 @@ def human_pair_documents(project: str, review_csv: Path, key_path: Path, pairwis
     return docs
 
 
+def scope_documents(docs: list[dict], experiment_id: str | None) -> list[dict]:
+    """実験 ID を付け、文書 ID と Run 単位の人間レビューの結合キーを実験ごとに分ける。
+
+    評価サービスは同じ Run を別の実験（評価条件）で採点し直すため、実験を含めないと
+    attempt:<run_id> や human:run:<run_id> が実験をまたいで同じになり、前の実験の文書を上書きする。
+    ペア比較の結合キー（<pairwise eval_id>:<pair_id>）は評価ごとに一意なのでそのまま使う。
+    """
+    if not experiment_id:
+        return docs
+    scoped = []
+    for doc in docs:
+        doc = {**doc, "experiment_id": experiment_id, "id": safe_id("experiment", experiment_id, doc["id"])}
+        if doc["type"] == "human_review" and doc.get("review_kind") == "run":
+            doc["review_key"] = f"{experiment_id}:{doc['run_id']}"
+        scoped.append(doc)
+    return scoped
+
+
 # ---------- Application Insights ----------
 
 EVENT_NAMES = {"attempt": "LlmJudgeAttempt", "run": "LlmJudgeRun", "variant": "LlmJudgeVariant",
@@ -247,6 +265,7 @@ def main() -> None:
     p.add_argument("--pair-key", type=Path, help="export-pairs の _key.json（--human-pair-reviews と一緒に指定）")
     p.add_argument("--cosmos-endpoint", default=os.environ.get("LLM_JUDGE_COSMOS_ENDPOINT"))
     p.add_argument("--appinsights-connection-string", default=os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING"))
+    p.add_argument("--experiment-id", help="評価サービスの実験 ID。文書 ID と Run の人間レビューの結合キーを実験ごとに分ける")
     p.add_argument("--types", help="送る種類をカンマ区切りで絞る（例: comparison,pairwise,pair）。既定はすべて")
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
@@ -261,6 +280,7 @@ def main() -> None:
         docs += human_run_documents(args.project, manifest, args.human_reviews, now)
     if args.human_pair_reviews:
         docs += human_pair_documents(args.project, args.human_pair_reviews, args.pair_key, args.pairwise_dir, now)
+    docs = scope_documents(docs, args.experiment_id)
     if types is not None:
         docs = [d for d in docs if d["type"] in types]
     if args.dry_run:

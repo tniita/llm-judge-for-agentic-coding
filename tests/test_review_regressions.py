@@ -593,7 +593,9 @@ class HumanDecisionTests(TemporaryTest):
         kql = (ROOT / "infra/queries.kql").read_text()
         for text, name in ((query, "name"), (kql, "Name")):
             self.assertIn('"LlmJudgeHumanReview"', text)
-            self.assertIn(f'review_key = iff({name} == "LlmJudgePair", strcat(eval_id, ":", review_id), review_id)', text)
+            self.assertIn(f'review_key = iff({name} == "LlmJudgePair", strcat(eval_id, ":", review_id),', text)
+            # 評価サービスの Run の人間レビューは実験ごとに分ける（<experiment_id>:<run_id>）
+            self.assertIn('iff(isempty(experiment_id), review_id, strcat(experiment_id, ":", review_id))', text)
             self.assertIn("join kind=leftouter human on project, review_key", text)
             self.assertIn('"未レビュー"', text)
 

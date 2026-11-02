@@ -10,6 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 HERE = Path(__file__).resolve().parent
 
@@ -86,12 +87,12 @@ class Publisher:
 
     def send(self, sink: str, docs: list[dict]) -> None:
         import publish_results
-        if sink == "cosmos":
+        if sink == "cosmos" and self.cosmos:
             publish_results.send_cosmos(self.cosmos, docs)
-        elif sink == "appinsights":
+        elif sink == "appinsights" and self.appinsights:
             publish_results.send_appinsights(self.appinsights, docs)
         else:
-            raise ValueError(f"未知の送信先: {sink}")
+            raise ValueError(f"送信先 {sink} は設定されていません")
 
 
 class GitHubReviewRepo:
@@ -119,7 +120,7 @@ class GitHubReviewRepo:
                                "（または LLM_JUDGE_GITHUB_TOKEN）が必要です")
         return cls(repo, token)
 
-    def _request(self, method: str, path: str, body: dict | None = None) -> dict | list | None:
+    def _request(self, method: str, path: str, body: dict | None = None) -> Any:
         req = urllib.request.Request(
             f"{self.api}/repos/{self.repo}/{path}", method=method,
             data=None if body is None else json.dumps(body).encode(),
@@ -134,28 +135,41 @@ class GitHubReviewRepo:
             raise RuntimeError(f"GitHub API {method} {path}: {exc.code} {exc.read()[:300]!r}") from exc
         return json.loads(raw) if raw else None
 
+    def _get(self, path: str) -> dict | None:
+        found = self._request("GET", path)
+        return found if isinstance(found, dict) else None
+
+    def _send(self, method: str, path: str, body: dict) -> dict:
+        result = self._request(method, path, body)
+        if not isinstance(result, dict):
+            raise RuntimeError(f"GitHub API {method} {path}: 想定外の応答です")
+        return result
+
     def get_file(self, path: str) -> str | None:
-        found = self._request("GET", f"contents/{urllib.parse.quote(path)}")
+        found = self._get(f"contents/{urllib.parse.quote(path)}")
         return None if found is None else base64.b64decode(found["content"]).decode("utf-8")
 
     def put_file(self, path: str, text: str, message: str) -> None:
-        existing = self._request("GET", f"contents/{urllib.parse.quote(path)}")
+        existing = self._get(f"contents/{urllib.parse.quote(path)}")
         body = {"message": message, "content": base64.b64encode(text.encode("utf-8")).decode()}
         if existing is not None:
             if base64.b64decode(existing["content"]).decode("utf-8") == text:
                 return
             body["sha"] = existing["sha"]
-        self._request("PUT", f"contents/{urllib.parse.quote(path)}", body)
+        self._send("PUT", f"contents/{urllib.parse.quote(path)}", body)
 
     def create_issue(self, title: str, body: str) -> dict:
-        issue = self._request("POST", "issues", {"title": title, "body": body, "labels": [self.LABEL]})
+        issue = self._send("POST", "issues", {"title": title, "body": body, "labels": [self.LABEL]})
         return {"number": issue["number"], "url": issue["html_url"]}
 
     def issue_state(self, number: int) -> str:
-        return self._request("GET", f"issues/{number}")["state"]
+        issue = self._get(f"issues/{number}")
+        if issue is None:
+            raise RuntimeError(f"{self.repo} に Issue #{number} がありません")
+        return issue["state"]
 
     def comment(self, number: int, body: str) -> None:
-        self._request("POST", f"issues/{number}/comments", {"body": body})
+        self._send("POST", f"issues/{number}/comments", {"body": body})
 
     def file_url(self, path: str) -> str:
         return f"https://github.com/{self.repo}/tree/HEAD/{path}"

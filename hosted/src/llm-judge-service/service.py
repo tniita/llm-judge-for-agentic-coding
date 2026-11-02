@@ -687,8 +687,13 @@ class Service:
         self.store.upsert(review)
         return review
 
+    def _repo(self):
+        if self.review_repo is None:
+            raise RuntimeError("レビュー用リポジトリが設定されていません")
+        return self.review_repo
+
     def _issue_body(self, review: dict, task_id: str) -> str:
-        base = self.review_repo.file_url(review["path"])
+        base = self._repo().file_url(review["path"])
         lines = [f"タスク `{task_id}` の実装を、方式名を伏せた資料でレビューしてください。", ""]
         if review["pairs"]:
             lines.append(f"- **ペア比較 {review['pairs']} 組**: [pairs/]({base}/pairs) の資料を読み、"
@@ -731,13 +736,13 @@ class Service:
         with tempfile.TemporaryDirectory(prefix="llm-judge-") as tmp:
             tmp = Path(tmp)
             if review["runs"]:
-                text = self.review_repo.get_file(f"{review['path']}/review.csv")
+                text = self._repo().get_file(f"{review['path']}/review.csv")
                 if text:
                     (tmp / "review.csv").write_text(text, encoding="utf-8")
                     manifest = [r["manifest"] for r in self.store.query("run", eid)]
                     docs += publish_results.human_run_documents(project, manifest, tmp / "review.csv", now)
             if review["pairs"]:
-                text = self.review_repo.get_file(f"{review['path']}/pairs_review.csv")
+                text = self._repo().get_file(f"{review['path']}/pairs_review.csv")
                 if text:
                     (tmp / "pairs.csv").write_text(text, encoding="utf-8")
                     pairwise_dir = tmp / "pairwise"
@@ -754,9 +759,9 @@ class Service:
         self.store.upsert(review)
         if decisions:
             self._deliver(eid, review["id"])
-            self.review_repo.comment(review["issue_number"], f"llm-judge: {len(decisions)} 件の判断を取り込みました。")
+            self._repo().comment(review["issue_number"], f"llm-judge: {len(decisions)} 件の判断を取り込みました。")
         elif previous != "empty":
-            self.review_repo.comment(review["issue_number"], "llm-judge: 記入された判断が見つかりませんでした。"
+            self._repo().comment(review["issue_number"], "llm-judge: 記入された判断が見つかりませんでした。"
                                      "シートを記入してコミットしてから、Issue を開き直して閉じてください。")
         return {"marker": review["marker"], "task_id": review["task_id"], "decisions": len(decisions)}
 
@@ -843,6 +848,8 @@ class Service:
         pairwise = defaultdict(lambda: {"wins_a": 0, "wins_b": 0, "ties": 0, "prefs": []})
         for (va, vb, _), prefs in by_task.items():
             c, m = pairwise[(va, vb)], mean(prefs)
+            if m is None:
+                continue
             c["prefs"].append(m)
             c["wins_a"] += m > 0
             c["wins_b"] += m < 0
@@ -896,7 +903,7 @@ class Service:
     def _deliver(self, experiment_id: str, doc_id: str) -> dict:
         """保存した内容を、まだ届いていない送信先にだけ送る。失敗しても例外にせず、次の sweep で送り直す。"""
         doc = self.store.get(experiment_id, doc_id)
-        if doc is None or not doc.get("publish"):
+        if doc is None or not doc.get("publish") or self.publisher is None:
             return {"status": "disabled"}
         publish = doc["publish"]
         errors = {}

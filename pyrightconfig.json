@@ -1,0 +1,4 @@
+{
+  "extraPaths": ["scripts", "hosted/src/llm-judge-service", "experiments/shoplib_base"],
+  "exclude": ["**/.venv", "**/__pycache__", "hosted/src/llm-judge-service/kit", "results"]
+}

@@ -72,7 +72,10 @@ AppEvents
          review_id = iff(Name == "LlmJudgePair", tostring(Properties.pair_id), tostring(Properties.run_id))
 | summarize arg_max(TimeGenerated, *) by project, eval_id, Name, review_id
 | where todouble(Measurements["human_review.count"]) > 0
-| extend review_key = iff(Name == "LlmJudgePair", strcat(eval_id, ":", review_id), review_id)
+| extend experiment_id = tostring(Properties.experiment_id)
+// Run の人間レビューは、評価サービスでは実験ごとに分ける（<experiment_id>:<run_id>）
+| extend review_key = iff(Name == "LlmJudgePair", strcat(eval_id, ":", review_id),
+                         iff(isempty(experiment_id), review_id, strcat(experiment_id, ":", review_id)))
 | join kind=leftouter human on project, review_key
 | extend run_ids = iff(Name == "LlmJudgePair", pack_array(Properties.run_a, Properties.run_b), pack_array(Properties.run_id))
 | mv-expand run_id = run_ids to typeof(string)

@@ -233,7 +233,7 @@ def merge(task_id: str, variants: list[str], attempts: int, timeout_hours: float
     missing = [{"variant": v, "attempt": a} for v, a in expected if (v, a) not in cells]
     first_seen = min((r["created_at"] for r in cells.values()), default=None)
 
-    if not cells:
+    if first_seen is None:
         status = "no_runs"
     elif not missing and not judge_failed:
         status = "complete"

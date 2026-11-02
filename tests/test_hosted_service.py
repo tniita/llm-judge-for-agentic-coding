@@ -17,6 +17,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,7 +34,6 @@ from store import FileStore  # noqa: E402
 
 try:
     import azure.ai.agentserver.invocations  # noqa: F401
-    from starlette.testclient import TestClient
     HAS_AGENTSERVER = True
 except ImportError:  # pragma: no cover
     HAS_AGENTSERVER = False
@@ -48,18 +48,22 @@ class FakeJudge:
     def __init__(self, root: Path):
         self.root = root
         self.version, self.evaluator_version, self.rubric = "2026-09-29", "2", config.rubric_fingerprint()
-        self.scores, self.pair_score, self.calls, self.fail = {}, 1, [], None
+        self.scores: dict[str, int] = {}
+        self.pair_score, self.calls = 1, []
+        self.fail: str | None = None
+        # 欠けた結果の再現: "empty"（点数なし）/ "short"（試行が足りない）/ "partial"（1 試行だけ評価エラー）
+        self.defect: str | None = None
 
     def condition(self):
         return {"judge": {"deployment": "judge", "model": "judge", "version": self.version},
                 "evaluator_versions": {n: self.evaluator_version for n in [*ABS_NAMES, PAIR_NAME]},
                 "rubric": self.rubric}
 
-    def _write(self, names, repeats, rows_per_trial):
+    def _write(self, names, repeats, rows_per_trial, trials=None):
         eval_id = f"eval_{len(self.calls) - 1}"
         out = self.root / eval_id
         out.mkdir(parents=True)
-        for i in range(1, repeats + 1):
+        for i in range(1, (repeats if trials is None else trials) + 1):
             (out / f"trial{i}.jsonl").write_text(
                 "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows_per_trial), encoding="utf-8")
         (out / "run_meta.json").write_text(json.dumps({
@@ -75,11 +79,18 @@ class FakeJudge:
         trial = [{
             # Foundry の出力は入力全体とプロンプトを含む。サービスは集計に必要な項目だけを残す
             "datasource_item": run_eval.to_item(row),
-            "results": [{"name": key, "status": "completed", "score": self.scores.get(row["run_id"], 5),
-                         "passed": True, "reason": "[confidence: high] R1: met", "sample": {"input": "x" * 1000}}
-                        for key in config.EVALUATORS],
+            "results": [] if self.defect == "empty" else [
+                {"name": key, "status": "completed", "score": self.scores.get(row["run_id"], 5),
+                 "passed": True, "reason": "[confidence: high] R1: met", "sample": {"input": "x" * 1000}}
+                for key in config.EVALUATORS],
         } for row in rows]
-        return self._write(ABS_NAMES, repeats, trial)
+        # short: run_meta の採点回数はそのままで、試行の結果が 1 回分欠ける
+        out = self._write(ABS_NAMES, repeats, trial, trials=repeats - 1 if self.defect == "short" else None)
+        if self.defect == "partial":
+            broken = [{**r, "results": [{**x, "status": "failed", "score": None, "passed": None} for x in r["results"]]}
+                      for r in trial]
+            (out / "trial1.jsonl").write_text("".join(json.dumps(r) + "\n" for r in broken), encoding="utf-8")
+        return out
 
     def judge_pairs(self, pairs, dataset, *, name, repeats):
         """点数の高い実装を位置に関係なく選ぶ。同点なら pair_score（1 = 常に A を選ぶ → 順序で判定が逆転）。"""
@@ -88,7 +99,7 @@ class FakeJudge:
         def score(item):
             a, b = (self.scores.get(item[k].removeprefix("diff-"), 5) for k in ("response_a", "response_b"))
             return self.pair_score if a == b else 1 if a > b else 5
-        trial = [{"datasource_item": item, "results": [
+        trial = [{"datasource_item": item, "results": [] if self.defect == "empty_pairs" else [
             {"name": "pairwise", "status": "completed", "score": score(item), "reason": "[confidence: high] A"}]}
             for item in run_pairwise.to_items(pairs, dataset)]
         return self._write([PAIR_NAME], repeats, trial)
@@ -96,11 +107,17 @@ class FakeJudge:
 
 class FakePublisher:
     def __init__(self):
-        self.docs = []
+        self.docs, self.sent, self.fail = [], {"cosmos": [], "appinsights": []}, set()
 
-    def publish(self, docs):
-        self.docs += docs
-        return len(docs)
+    def sinks(self):
+        return ["cosmos", "appinsights"]
+
+    def send(self, sink, docs):
+        if sink in self.fail:
+            raise RuntimeError(f"{sink} に接続できません")
+        self.sent[sink] += docs
+        if sink == "cosmos":
+            self.docs += docs
 
 
 class FakeRepo:
@@ -170,12 +187,26 @@ class ServiceTestBase(unittest.TestCase):
                 "row": row(run_id, task) if m["hard_gate"] == "pass" else None}
         return self.service.handle(body, invocation_id=f"inv-{run_id}-{len(self.queue)}")
 
-    def run_doc(self, run_id, eid="exp1"):
-        return self.service.store.get(eid, f"run:{run_id}")
+    def doc(self, eid: str, doc_id: str) -> dict:
+        found = self.service.store.get(eid, doc_id)
+        assert found is not None, f"{eid}/{doc_id} がありません"
+        return found
 
-    def task_doc(self, task="T1", eid="exp1"):
-        return self.service.store.get(eid, f"task:{task}")
+    def found(self, doc_id: str) -> dict:
+        found = self.service.store.find(doc_id)
+        assert found is not None, f"{doc_id} がありません"
+        return found
 
+    def job(self, invocation_id: str) -> dict:
+        view = self.service.job_status(invocation_id)
+        assert view is not None, f"invocation {invocation_id} がありません"
+        return view
+
+    def run_doc(self, run_id: str, eid: str = "exp1") -> dict:
+        return self.doc(eid, f"run:{run_id}")
+
+    def task_doc(self, task: str = "T1", eid: str = "exp1") -> dict:
+        return self.service.store.get(eid, f"task:{task}") or {}
 
 class ExperimentTests(ServiceTestBase):
     def test_experiment_fixes_definition_and_condition(self):
@@ -233,7 +264,7 @@ class JudgeAndCompareTests(ServiceTestBase):
             self.assertNotIn("sample", first["results"][0])
             self.assertEqual(run["summary"]["total"], 100)
 
-        job = self.service.job_status("inv-r1-0")
+        job = self.job("inv-r1-0")
         self.assertEqual((job["status"], job["result"]["status"]), ("completed", "judged"))
         self.assertEqual(job["result"]["report_url"], "https://portal/eval_0")
 
@@ -245,7 +276,7 @@ class JudgeAndCompareTests(ServiceTestBase):
         self.assertEqual((pair["pref"], pair["position_inconsistent"]), (0.0, True))
         self.assertEqual(self.judge.calls[-1], ("pairwise", "exp1-T1-pairwise"))
         # 判定の逆転と、方式間の総合点差が gap 未満 → 人間レビュー（レビュー用リポジトリがないので資料を保存）
-        review = self.service.store.get("exp1", task["review_id"])
+        review = self.doc("exp1", task["review_id"])
         self.assertEqual((review["status"], review["runs"], review["pairs"]), ("manual", 2, 1))
         self.assertIn("pairs_review.csv", review["files"])
         self.assertNotIn("pairs/_key.json", review["files"])
@@ -277,7 +308,7 @@ class JudgeAndCompareTests(ServiceTestBase):
         self.service.handle({"op": "submit_run", "experiment_id": "exp1", "manifest": m,
                              "row": {**row("r1"), "response": "diff-v2"}}, invocation_id="inv-new")
         self.service.execute(first)
-        self.assertEqual(self.service.job_status(first.removeprefix("job:"))["result"]["status"], "superseded")
+        self.assertEqual(self.job(first.removeprefix("job:"))["result"]["status"], "superseded")
         self.drain()
         self.assertEqual(self.run_doc("r1")["row"]["response"], "diff-v2")
         self.assertEqual(self.run_doc("r1")["state"], "judged")
@@ -314,13 +345,13 @@ class JudgeAndCompareTests(ServiceTestBase):
         self.clock += timedelta(hours=25)
         status, body = self.service.handle({"op": "compare_task", "experiment_id": "exp1", "task_id": "T1"}, "c1")
         self.drain()
-        self.assertEqual(self.service.job_status("c1")["result"]["status"], "insufficient")
+        self.assertEqual(self.job("c1")["result"]["status"], "insufficient")
         self.submit("r2", "fusion")
         self.drain()
         marker = self.task_doc()["marker"]
         self.service.handle({"op": "compare_task", "experiment_id": "exp1", "task_id": "T1"}, "c2")
         self.drain()
-        self.assertEqual(self.service.job_status("c2")["result"], {"task_id": "T1", "status": "already_compared",
+        self.assertEqual(self.job("c2")["result"], {"task_id": "T1", "status": "already_compared",
                                                                    "marker": marker})
         pairwise_calls = [c for c in self.judge.calls if c[0] == "pairwise"]
         self.service.handle({"op": "compare_task", "experiment_id": "exp1", "task_id": "T1", "force": True}, "c3")
@@ -334,13 +365,13 @@ class JudgeAndCompareTests(ServiceTestBase):
         run = self.run_doc("r1")
         self.assertEqual(run["state"], "judge_failed")
         self.assertIn("評価条件が実験 exp1 の作成時と異なる", run["error"])
-        self.assertEqual(self.service.job_status("inv-r1-0")["status"], "failed")
+        self.assertEqual(self.job("inv-r1-0")["status"], "failed")
         self.assertFalse(any(c[0] == "judge" for c in self.judge.calls))
 
         self.judge.version = "2026-09-29"
         self.service.handle({"op": "sweep", "experiment_id": "exp1"}, "s1")
         self.drain()
-        self.assertEqual(self.service.job_status("s1")["result"]["experiments"]["exp1"]["retried_runs"], 1)
+        self.assertEqual(self.job("s1")["result"]["experiments"]["exp1"]["retried_runs"], 1)
         self.assertEqual(self.run_doc("r1")["state"], "judged")
         self.assertEqual(self.run_doc("r1")["retries"], 1)
 
@@ -371,7 +402,7 @@ class JudgeAndCompareTests(ServiceTestBase):
     def test_sweep_fails_stale_jobs_and_requeues_the_run(self):
         self.submit("r1", "fixed")
         job_id = self.queue.pop(0)
-        job = self.service.store.find(job_id)
+        job = self.found(job_id)
         job.update(status="running", heartbeat_at=svc.iso(self.clock))
         self.service.store.upsert(job)
         run = self.run_doc("r1")
@@ -380,16 +411,16 @@ class JudgeAndCompareTests(ServiceTestBase):
         self.clock += timedelta(hours=1)
         self.service.handle({"op": "sweep"}, "s1")
         self.drain()
-        result = self.service.job_status("s1")["result"]["experiments"]["exp1"]
+        result = self.job("s1")["result"]["experiments"]["exp1"]
         self.assertEqual((result["stale_jobs"], result["retried_runs"]), (1, 1))
-        self.assertEqual(self.service.store.find(job_id)["status"], "failed")
+        self.assertEqual(self.found(job_id)["status"], "failed")
         self.assertEqual(self.run_doc("r1")["state"], "judged")
 
     def test_queued_compare_jobs_are_deduplicated_but_running_ones_are_not(self):
         _, first = self.service.handle({"op": "compare_task", "experiment_id": "exp1", "task_id": "T1"}, "c1")
         _, second = self.service.handle({"op": "compare_task", "experiment_id": "exp1", "task_id": "T1"}, "c2")
         self.assertEqual((second["invocation_id"], second["deduplicated"]), ("c1", True))
-        job = self.service.store.find("job:c1")
+        job = self.found("job:c1")
         job["status"] = "running"
         self.service.store.upsert(job)
         _, third = self.service.handle({"op": "compare_task", "experiment_id": "exp1", "task_id": "T1"}, "c3")
@@ -397,72 +428,223 @@ class JudgeAndCompareTests(ServiceTestBase):
 
     def test_cancel_only_queued_jobs(self):
         self.service.handle({"op": "compare_task", "experiment_id": "exp1", "task_id": "T1"}, "c1")
-        self.assertEqual(self.service.cancel("c1")["status"], "cancelled")
+        self.assertEqual((self.service.cancel("c1") or {}).get("status"), "cancelled")
         self.drain()
-        self.assertEqual(self.service.job_status("c1")["status"], "cancelled")
+        self.assertEqual(self.job("c1")["status"], "cancelled")
         self.assertIsNone(self.service.cancel("missing"))
+
+
+class RecoveryTests(ServiceTestBase):
+    """復旧処理の詰まり・欠けた採点結果・送信の失敗・実験をまたいだ ID の衝突。"""
+
+    def setUp(self):
+        super().setUp()
+        self.create()
+
+    def stale(self, invocation_id, status="running"):
+        job = self.found(f"job:{invocation_id}")
+        job.update(status=status, heartbeat_at=svc.iso(self.clock))
+        self.service.store.upsert(job)
+        self.queue.clear()
+
+    def test_stuck_sweep_does_not_block_later_sweeps(self):
+        self.service.handle({"op": "sweep"}, "s-old")
+        self.stale("s-old")
+        self.clock += timedelta(hours=1)
+        status, body = self.service.handle({"op": "sweep"}, "s-new")
+        self.assertEqual((body["invocation_id"], body["deduplicated"]), ("s-new", False))
+        self.assertEqual(self.job("s-old")["status"], "failed")
+        self.drain()
+        self.assertEqual(self.job("s-new")["status"], "completed")
+
+    def test_sweep_cleans_stale_jobs_in_service_partition_and_other_sweeps(self):
+        self.service.handle({"op": "ingest_reviews"}, "i-old")
+        self.stale("i-old")
+        self.service.handle({"op": "sweep", "experiment_id": "exp1"}, "s-exp")
+        self.stale("s-exp", status="queued")
+        self.clock += timedelta(hours=1)
+        # 実験ごとの sweep の重複判定に引っかからないよう、全体の sweep で片付ける
+        self.service.handle({"op": "sweep"}, "s-all")
+        self.drain()
+        result = self.job("s-all")["result"]
+        self.assertEqual(result["stale_jobs_elsewhere"], 1)
+        self.assertEqual(result["experiments"]["exp1"]["stale_jobs"], 1)
+        self.assertEqual(self.job("i-old")["status"], "failed")
+        self.assertEqual(self.job("s-exp")["status"], "failed")
+
+    def test_heartbeat_does_not_revive_a_job_that_was_cleaned_up(self):
+        import threading
+        self.service.handle({"op": "sweep"}, "s1")
+        job = self.found("job:s1")
+        job["status"] = "failed"
+        self.service.store.upsert(job)
+        self.service.heartbeat_seconds = 0.001
+        stop = threading.Event()
+        beat = threading.Thread(target=self.service._heartbeat, args=(job["experiment_id"], job["id"], stop))
+        beat.start()
+        beat.join(timeout=2)
+        stop.set()
+        self.assertFalse(beat.is_alive())
+        self.assertEqual(self.job("s1")["status"], "failed")
+
+    def test_empty_or_short_results_are_judge_failures_and_retried(self):
+        for defect, message in (("empty", "点数のない採点結果"), ("short", "試行が 2 回分しかありません")):
+            with self.subTest(defect=defect):
+                run_id = f"r-{defect}"
+                self.judge.defect = defect
+                self.submit(run_id, "fixed")
+                self.drain()
+                run = self.run_doc(run_id)
+                self.assertEqual(run["state"], "judge_failed")
+                self.assertIn(message, run["error"])
+                self.assertEqual(self.job(f"inv-{run_id}-0")["status"], "failed")
+                self.assertFalse([d for d in self.publisher.docs if d.get("run_id") == run_id])
+        self.judge.defect = None
+        self.service.handle({"op": "sweep", "experiment_id": "exp1"}, "s1")
+        self.drain()
+        self.assertEqual({self.run_doc(r)["state"] for r in ("r-empty", "r-short")}, {"judged"})
+
+    def test_partially_failed_trials_are_judged_but_sent_to_human_review(self):
+        self.judge.defect = "partial"
+        self.submit("r1", "fixed")
+        self.drain()
+        run = self.run_doc("r1")
+        self.assertEqual(run["state"], "judged")
+        self.assertTrue(any("評価エラー" in r for r in run["summary"]["human_review"]))
+
+    def test_empty_pairwise_results_fail_the_comparison_without_marking_it_done(self):
+        self.judge.defect = "empty_pairs"
+        self.submit("r1", "fixed")
+        self.submit("r2", "fusion")
+        self.drain()
+        failed = [j for j in self.service.store.query("job", "exp1", op="compare_task") if j["status"] == "failed"]
+        self.assertTrue(failed and "点数のない採点結果" in failed[-1]["error"])
+        self.assertNotIn("marker", self.task_doc() or {})
+        self.judge.defect = None
+        self.service.handle({"op": "compare_task", "experiment_id": "exp1", "task_id": "T1"}, "c1")
+        self.drain()
+        self.assertEqual(self.job("c1")["result"]["status"], "compared")
+
+    def test_failed_publication_is_kept_and_delivered_later(self):
+        self.publisher.fail = {"appinsights"}
+        self.submit("r1", "fixed")
+        self.drain()
+        run = self.run_doc("r1")
+        self.assertEqual((run["state"], run["publish_status"], run["publish"]["pending"]), ("judged", "pending", ["appinsights"]))
+        self.assertIn("appinsights に接続できません", run["publish"]["errors"]["appinsights"])
+        self.assertEqual(self.job("inv-r1-0")["result"]["published"]["status"], "pending")
+        cosmos_before = len(self.publisher.sent["cosmos"])
+
+        # 再登録は「完了済み」を返すが、未送信の分を送り直す（届いた送信先には送らない）
+        status, body = self.submit("r1", "fixed")
+        self.assertEqual((status, body["published"]["status"]), (200, "pending"))
+        self.publisher.fail = set()
+        status, body = self.submit("r1", "fixed")
+        self.assertEqual(body["published"]["status"], "sent")
+        self.assertEqual(len(self.publisher.sent["cosmos"]), cosmos_before)
+        self.assertEqual({d["type"] for d in self.publisher.sent["appinsights"]}, {"attempt", "run"})
+
+    def test_sweep_delivers_pending_publications_for_runs_and_comparisons(self):
+        self.publisher.fail = {"cosmos", "appinsights"}
+        self.submit("r1", "fixed", hard_gate="fail")
+        self.submit("r2", "fusion")
+        self.drain()
+        self.assertEqual(self.task_doc()["publish_status"], "pending")
+        self.assertEqual(self.publisher.docs, [])
+        self.publisher.fail = set()
+        self.service.handle({"op": "sweep", "experiment_id": "exp1"}, "s1")
+        self.drain()
+        result = self.job("s1")["result"]["experiments"]["exp1"]
+        self.assertEqual((result["publish_delivered"], result["publish_pending"]), (3, 0))
+        self.assertLessEqual({"attempt", "run", "comparison"}, {d["type"] for d in self.publisher.docs})
+        self.assertEqual(self.run_doc("r1")["publish_status"], "sent")
+
+    def test_documents_are_scoped_per_experiment(self):
+        self.submit("r1", "fixed")
+        self.drain()
+        self.create(eid="exp2")
+        self.service.handle({"op": "rejudge_experiment", "experiment_id": "exp2", "from_experiment_id": "exp1"}, "rj")
+        self.drain()
+        attempts = [d for d in self.publisher.docs if d["type"] == "attempt" and d["run_id"] == "r1"]
+        self.assertEqual({d["experiment_id"] for d in attempts}, {"exp1", "exp2"})
+        self.assertEqual(len({d["id"] for d in attempts}), 2)
+        self.assertEqual(len({d["id"] for d in self.publisher.docs}), len(self.publisher.docs))
+
+        import publish_results
+        human = publish_results.scope_documents(
+            [{"id": "human:run:r1", "type": "human_review", "review_kind": "run", "run_id": "r1", "review_key": "r1"},
+             {"id": "human:pair:e:P001", "type": "human_review", "review_kind": "pair", "review_key": "e:P001"}], "exp2")
+        self.assertEqual([d["review_key"] for d in human], ["exp2:r1", "e:P001"])
+        self.assertNotEqual(human[0]["id"], publish_results.scope_documents(
+            [{"id": "human:run:r1", "type": "human_review", "review_kind": "run", "run_id": "r1"}], "exp1")[0]["id"])
+        self.assertEqual(publish_results.scope_documents(human[:1], None), human[:1])
+        workbook = json.loads((ROOT / "infra" / "workbook.json").read_text())
+        query = next(i["content"]["query"] for i in workbook["items"] if i.get("name") == "人間レビューに回す Run")
+        self.assertIn('strcat(experiment_id, ":", review_id)', query)
+        self.assertIn('strcat(experiment_id, ":", review_id)', (ROOT / "infra" / "queries.kql").read_text())
 
 
 class ReviewTests(ServiceTestBase):
     def setUp(self):
         super().setUp()
-        self.service = self.make_service(FakeRepo())
+        self.fake_repo = FakeRepo()
+        self.service = self.make_service(self.fake_repo)
         self.create()
         self.judge.pair_score = 3  # 同点は「差なし」と判定させる（ペア比較はレビュー対象にならず、総合点差が gap 未満で Run だけが対象）
 
     def fill(self, path, column, value):
-        rows = list(csv.DictReader(io.StringIO(self.repo.files[path].lstrip("\ufeff"))))
+        rows = list(csv.DictReader(io.StringIO(self.fake_repo.files[path].lstrip("\ufeff"))))
         for r in rows:
             r[column] = value
         out = io.StringIO()
         writer = csv.DictWriter(out, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
-        self.repo.files[path] = out.getvalue()
+        self.fake_repo.files[path] = out.getvalue()
 
     def test_review_repo_issue_and_ingestion(self):
         self.judge.pair_score = 1  # 両方の順序で A を選ぶ → 判定が逆転し、ペア比較も人間レビュー
         self.submit("r1", "fixed")
         self.submit("r2", "fusion")
         self.drain()
-        review = self.service.store.get("exp1", self.task_doc()["review_id"])
+        review = self.doc("exp1", self.task_doc()["review_id"])
         self.assertEqual((review["status"], review["issue_number"], review["pairs"], review["runs"]), ("open", 1, 1, 2))
         base = review["path"]
         self.assertTrue(base.startswith("reviews/exp1/T1/llm-judge-compare-T1-"))
-        self.assertIn(f"{base}/pairs_review.csv", self.repo.files)
-        self.assertIn(f"{base}/review.csv", self.repo.files)
-        self.assertNotIn(f"{base}/pairs/_key.json", self.repo.files)
-        issue = self.repo.issues[1]
+        self.assertIn(f"{base}/pairs_review.csv", self.fake_repo.files)
+        self.assertIn(f"{base}/review.csv", self.fake_repo.files)
+        self.assertNotIn(f"{base}/pairs/_key.json", self.fake_repo.files)
+        issue = self.fake_repo.issues[1]
         self.assertIn("ペア比較 1 組", issue["body"])
-        for text in [issue["title"], issue["body"], *self.repo.files.values()]:
+        for text in [issue["title"], issue["body"], *self.fake_repo.files.values()]:
             self.assertNotIn("fixed", text)
             self.assertNotIn("fusion", text)
 
         # Issue が開いている間は取り込まない
         self.service.handle({"op": "ingest_reviews", "experiment_id": "exp1"}, "i1")
         self.drain()
-        self.assertEqual(self.service.job_status("i1")["result"]["waiting"], 1)
+        self.assertEqual(self.job("i1")["result"]["waiting"], 1)
 
         # 記入せずに閉じた → 取り込むものがないと 1 回だけコメント
-        self.repo.issues[1]["state"] = "closed"
+        self.fake_repo.issues[1]["state"] = "closed"
         for i in range(2):
             self.service.handle({"op": "ingest_reviews"}, f"i-empty-{i}")
             self.drain()
-        self.assertEqual(self.service.store.get("exp1", review["id"])["status"], "empty")
-        self.assertEqual(len(self.repo.comments), 1)
+        self.assertEqual(self.doc("exp1", review["id"])["status"], "empty")
+        self.assertEqual(len(self.fake_repo.comments), 1)
 
         self.fill(f"{base}/pairs_review.csv", "better", "A")
         self.fill(f"{base}/review.csv", "requirements", "4")
         self.service.handle({"op": "ingest_reviews"}, "i2")
         self.drain()
-        stored = self.service.store.get("exp1", review["id"])
+        stored = self.doc("exp1", review["id"])
         self.assertEqual(stored["status"], "ingested")
         kinds = sorted(d["review_kind"] for d in stored["decisions"])
         self.assertEqual(kinds, ["pair", "run", "run"])
         pair_decision = next(d for d in stored["decisions"] if d["review_kind"] == "pair")
         self.assertIn(pair_decision["better"], ("fixed", "fusion"))
         self.assertTrue(any(d["type"] == "human_review" for d in self.publisher.docs))
-        self.assertIn("3 件の判断を取り込みました", self.repo.comments[-1][1])
+        self.assertIn("3 件の判断を取り込みました", self.fake_repo.comments[-1][1])
 
         report = self.service.report({"experiment_id": "exp1"})
         self.assertEqual(report["human_reviews"]["decisions"], 3)
@@ -474,7 +656,7 @@ class ReviewTests(ServiceTestBase):
         self.drain()
         self.service.handle({"op": "compare_task", "experiment_id": "exp1", "task_id": "T1", "force": True}, "c")
         self.drain()
-        self.assertEqual(len(self.repo.issues), 1)
+        self.assertEqual(len(self.fake_repo.issues), 1)
 
 
 class RejudgeAndReportTests(ServiceTestBase):
@@ -502,7 +684,7 @@ class RejudgeAndReportTests(ServiceTestBase):
                                             "from_experiment_id": "exp1"}, "rj")
         self.assertEqual(status, 202)
         self.drain()
-        result = self.service.job_status("rj")["result"]
+        result = self.job("rj")["result"]
         self.assertEqual(len(result["submitted"]), 5)
         runs = self.service.store.query("run", "exp2")
         self.assertEqual({r["state"] for r in runs}, {"judged"})
@@ -533,6 +715,7 @@ class HttpTests(ServiceTestBase):
     def setUp(self):
         super().setUp()
         import main
+        from starlette.testclient import TestClient
         self.service.start_job = None
         self.app = main.create_app(self.service, max_jobs=1)
         self.client = TestClient(self.app)
@@ -602,7 +785,7 @@ class ClientTests(unittest.TestCase):
                     return 200, {"status": "completed", "run_id": body["manifest"]["run_id"]}
             args = SimpleArgs(experiment_id="e", dataset=tmp / "d.jsonl", manifest=tmp / "m.jsonl", wait=False)
             with contextlib.redirect_stdout(io.StringIO()), patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(tmp / "s.md")}):
-                judge_client.cmd_submit(Fake(), args)
+                judge_client.cmd_submit(cast(judge_client.Client, Fake()), args)
             self.assertEqual([b["row"] and b["row"]["run_id"] for b in sent], ["r1", None])
             summary = (tmp / "s.md").read_text()
             self.assertNotIn("fixed", summary)
@@ -622,6 +805,7 @@ class PackagingTests(unittest.TestCase):
     def test_kit_copy_does_not_need_excluded_scripts(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location("sync_kit", ROOT / "hosted" / "sync_kit.py")
+        assert spec is not None and spec.loader is not None
         sync_kit = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(sync_kit)
         excluded = {Path(n).stem for n in sync_kit.EXCLUDE}
@@ -638,7 +822,7 @@ class PackagingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "hosted"
             import shutil
-            shutil.copytree(ROOT / "hosted", target, ignore=shutil.ignore_patterns("kit", ".state", "__pycache__"))
+            shutil.copytree(ROOT / "hosted", target, ignore=shutil.ignore_patterns("kit", ".state", "__pycache__", ".venv"))
             shutil.copytree(ROOT / "scripts", Path(tmp) / "scripts")
             shutil.copytree(ROOT / "evaluators", Path(tmp) / "evaluators")
             subprocess.run([sys.executable, str(target / "sync_kit.py")], check=True, capture_output=True)
