@@ -7,21 +7,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from azure.ai.projects import AIProjectClient
-from azure.identity import AzureCliCredential
 
+from azure_auth import credential
 from config import (
     FOUNDRY_PREVIEW_HEADERS,
     JUDGE_DEPLOYMENT,
     JUDGE_MODEL_VERSION,
     PROJECT_ENDPOINT,
-    ROOT,
+    RESULTS_DIR,
+    rubric_fingerprint,
 )
 
 TERMINAL = {"completed", "failed", "canceled"}
 
 
 def project_client() -> AIProjectClient:
-    return AIProjectClient(PROJECT_ENDPOINT, AzureCliCredential(), allow_preview=True)
+    return AIProjectClient(PROJECT_ENDPOINT, credential(), allow_preview=True)
 
 
 def check_judge(project: AIProjectClient) -> dict:
@@ -42,6 +43,17 @@ def evaluator_versions(project: AIProjectClient, names: list[str]) -> dict[str, 
         found = list(project.evaluators.list_versions(name, type="custom", headers=FOUNDRY_PREVIEW_HEADERS))
         versions[name] = max((v.version for v in found), key=int) if found else "missing"
     return versions
+
+
+def current_condition(evaluator_names: list[str]) -> dict:
+    """今この環境で採点したら記録される評価条件（Judge・評価器のバージョン・ルーブリック）。採点はしない。"""
+    project = project_client()
+    judge = check_judge(project)
+    return {
+        "judge": judge,
+        "evaluator_versions": evaluator_versions(project, evaluator_names),
+        "rubric": rubric_fingerprint(),
+    }
 
 
 def run_evaluation(
@@ -99,7 +111,7 @@ def run_evaluation(
                 pending.discard(run_id)
                 print(f"{run_id}: {run.status} {run.result_counts}")
 
-    out_dir = ROOT / "results" / eval_obj.id
+    out_dir = RESULTS_DIR / eval_obj.id
     out_dir.mkdir(parents=True, exist_ok=True)
     for i, run in enumerate(runs, start=1):
         rows = [o.model_dump(mode="json") for o in client.evals.runs.output_items.list(run.id, eval_id=eval_obj.id)]
@@ -115,6 +127,7 @@ def run_evaluation(
         "project_endpoint": PROJECT_ENDPOINT,
         "judge": judge,
         "evaluator_versions": versions,
+        "rubric": rubric_fingerprint(),
         "repeats": repeats,
         "items": len(items),
         "run_ids": [r.id for r in runs],

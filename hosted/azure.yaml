@@ -1,0 +1,110 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+#
+# LLM Judge の評価サービスを、既存の Foundry プロジェクトに Hosted Agent（Invocations プロトコル）としてデプロイする。
+# Judge のモデルデプロイ（JUDGE_DEPLOYMENT）と評価器（scripts/register_evaluators.py）は登録済みの前提。
+#
+# 手順（README の「Foundry Hosted Agent」）:
+#   cd hosted
+#   azd env new <env> && azd env set AZURE_AI_PROJECT_ENDPOINT ... （ほかの変数も同様）
+#   AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd deploy
+# deploy の前に hooks の sync_kit.py が scripts/ と evaluators/ を src/llm-judge-service/kit/ にコピーする。
+# レビュー用リポジトリを使わない場合は、llm-judge-review-closed を除いてデプロイする:
+#   azd deploy llm-judge-service && azd deploy llm-judge-sweep
+requiredVersions:
+  azd: '>=1.27.1'
+  extensions:
+    azure.ai.agents: '>=1.0.0-beta.9'
+    azure.ai.routines: '>=0.0.1'
+name: llm-judge-service
+hooks:
+  prepackage:
+    shell: sh
+    run: python3 sync_kit.py
+  predeploy:
+    shell: sh
+    run: python3 sync_kit.py
+services:
+  llm-judge-service:
+    host: azure.ai.agent
+    kind: hosted
+    name: llm-judge-service
+    description: コーディングエージェントの PR を実験単位で採点・比較する LLM Judge の評価サービス。評価条件を実験ごとに固定し、方式比較と人間レビューの取り込みまで行う。
+    project: src/llm-judge-service
+    language: python
+    codeConfiguration:
+      runtime: python_3_13
+      entryPoint: main.py
+    protocols:
+      - protocol: invocations
+        version: 2.0.0
+    container:
+      resources:
+        cpu: '1'
+        memory: 2Gi
+    environmentVariables:
+      - name: PYTHONNOUSERSITE
+        value: "1"
+      - name: LLM_JUDGE_AUTH
+        value: default
+      - name: LLM_JUDGE_RESULTS_DIR
+        value: /tmp/llm-judge-results
+      - name: LLM_JUDGE_MAX_JOBS
+        value: ${LLM_JUDGE_MAX_JOBS}
+      - name: JUDGE_DEPLOYMENT
+        value: ${JUDGE_DEPLOYMENT}
+      - name: JUDGE_MODEL_VERSION
+        value: ${JUDGE_MODEL_VERSION}
+      - name: LLM_JUDGE_STATE_COSMOS_ENDPOINT
+        value: ${LLM_JUDGE_STATE_COSMOS_ENDPOINT}
+      - name: LLM_JUDGE_PUBLISH
+        value: ${LLM_JUDGE_PUBLISH}
+      - name: LLM_JUDGE_COSMOS_ENDPOINT
+        value: ${LLM_JUDGE_COSMOS_ENDPOINT}
+      - name: LLM_JUDGE_APPINSIGHTS_CONNECTION_STRING
+        value: ${LLM_JUDGE_APPINSIGHTS_CONNECTION_STRING}
+      - name: LLM_JUDGE_REVIEW_REPO
+        value: ${LLM_JUDGE_REVIEW_REPO}
+      # トークン自体は Key Vault に置き、ここには URI だけを渡す
+      - name: LLM_JUDGE_GITHUB_TOKEN_SECRET_URI
+        value: ${LLM_JUDGE_GITHUB_TOKEN_SECRET_URI}
+
+  # 定期実行: 止まったジョブの片付け・採点のやり直し・未比較タスクの比較・レビューの取り込み
+  llm-judge-sweep:
+    host: azure.ai.routine
+    uses:
+      - llm-judge-service
+    description: LLM Judge の評価サービスの定期処理（sweep）
+    enabled: true
+    triggers:
+      default:
+        type: schedule
+        cron_expression: "17 */3 * * *"
+        time_zone: Asia/Tokyo
+    action:
+      type: invoke_agent_invocations_api
+      agent_name: llm-judge-service
+      input:
+        op: sweep
+
+  # レビュー用リポジトリの Issue が閉じられたら、人間の判断を取り込む
+  # Foundry プロジェクトに GitHub の接続を作り、その ID を LLM_JUDGE_GITHUB_CONNECTION_ID に設定する
+  llm-judge-review-closed:
+    host: azure.ai.routine
+    uses:
+      - llm-judge-service
+    description: レビュー用リポジトリで閉じられた Issue から人間の判断を取り込む
+    enabled: true
+    triggers:
+      default:
+        type: github_issue
+        connection_id: ${LLM_JUDGE_GITHUB_CONNECTION_ID}
+        owner: ${LLM_JUDGE_REVIEW_REPO_OWNER}
+        repository: ${LLM_JUDGE_REVIEW_REPO_NAME}
+        issue_event: closed
+    action:
+      type: invoke_agent_invocations_api
+      agent_name: llm-judge-service
+      input:
+        op: ingest_reviews
+infra:
+  provider: microsoft.foundry

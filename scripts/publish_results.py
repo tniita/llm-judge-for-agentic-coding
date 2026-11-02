@@ -216,9 +216,10 @@ def send_appinsights(cs: str, docs: list[dict]) -> None:
 
 def send_cosmos(endpoint: str, docs: list[dict]) -> None:
     from azure.cosmos import CosmosClient
-    from azure.identity import AzureCliCredential
 
-    container = CosmosClient(endpoint, credential=AzureCliCredential()) \
+    from azure_auth import credential
+
+    container = CosmosClient(endpoint, credential=credential()) \
         .get_database_client(COSMOS_DATABASE).get_container_client(COSMOS_CONTAINER)
     for doc in docs:
         container.upsert_item(doc)

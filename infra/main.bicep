@@ -104,7 +104,20 @@ resource cosmosContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/con
   }
 }
 
+// 評価サービス（hosted/、Foundry Hosted Agent）の状態（実験・Run・タスクの比較・人間レビュー・ジョブ）。実験単位で分割する
+resource cosmosServiceContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2024-11-15' = {
+  parent: cosmosDb
+  name: 'service'
+  properties: {
+    resource: {
+      id: 'service'
+      partitionKey: { paths: [ '/experiment_id' ], kind: 'Hash' }
+    }
+  }
+}
+
 // Cosmos DB Built-in Data Contributor
+// 評価サービス（hosted/）を使う場合は、Hosted Agent のマネージド ID の objectId も dataContributorPrincipalIds に加える
 resource cosmosWriters 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2024-11-15' = [for principalId in dataContributorPrincipalIds: {
   parent: cosmos
   name: guid(cosmos.id, principalId, 'data-contributor')

@@ -163,7 +163,7 @@ Run ごとに [scripts/make_row.py](scripts/make_row.py) を実行します。Ju
 
 結果は `summary.jsonl`（Run ごと）と `variants.json`（方式ごと・比較）にも保存されます。
 
-Run ごとに別々に評価した結果（CI で Run ごとに `run_eval.py` を実行した場合など）は、`--manifest` と `--out-dir` を付けて複数の結果ディレクトリをまとめて集計できます。
+Run ごとに別々に評価した結果（CI で Run ごとに `run_eval.py` を実行した場合など）は、`--manifest` と `--out-dir` を付けて複数の結果ディレクトリをまとめて集計できます。各ディレクトリの `run_meta.json` で評価条件（Judge のデプロイとモデルバージョン・評価器のバージョン・採点回数）を照合し、異なるものが混ざっていれば止めます（承知の上で集計するなら `--allow-mixed-conditions`）。照合した条件は `variants.json` の `conditions` に残ります。
 
 ```bash
 .venv/bin/python scripts/aggregate.py --manifest merged_manifest.jsonl --out-dir results/merged results/<eval_1> results/<eval_2>
@@ -385,14 +385,116 @@ flowchart TD
   P --> M
 ```
 
-- **揃ったかの判定:** `scripts/collect_task.py` が成果物 `llm-judge-run-<task_id>-*` を集め、`LLM_JUDGE_COMPARE_VARIANTS` × `LLM_JUDGE_COMPARE_ATTEMPTS` の Run が揃ったかを見る。Hard Gate 不合格の Run も「揃った」に数える。同じ Run の再実行は最新の成果物を、同じ方式・attempt に複数の Run があれば最新の Run を使う
-- **待ち時間:** 最初の Run から `LLM_JUDGE_COMPARE_TIMEOUT_HOURS`（既定 24 時間）を過ぎたら、揃った分だけで比較し、未提出を `collect.json` に記録する。比較できる方式が 2 つ未満なら比較しない
-- **二重実行の防止:** タスクごとの `concurrency` と、比較した Run の組から作る成果物名（`llm-judge-compare-<task_id>-<ハッシュ>`）で、同じ組を二度比較しない。途中で失敗した場合はこの成果物を残さず、次の起動でやり直す。後から Run が増えると組が変わるため再比較する
+- **揃ったかの判定:** `scripts/collect_task.py` が成果物 `llm-judge-run-<task_id>-*` を集め、`LLM_JUDGE_COMPARE_VARIANTS` × `LLM_JUDGE_COMPARE_ATTEMPTS` の Run が揃ったかを見る。Run は「採点済み」（採点結果と `run_meta.json` あり）・「Hard Gate 不合格」・「採点失敗」（合格したが採点結果がない）に分け、前の 2 つだけを「揃った」に数える。採点失敗の Run は `llm-judge.yml` を再実行すれば揃う。同じ Run の再実行は最新の成果物を、同じ方式・attempt に複数の Run があれば最新の Run を使う
+- **待ち時間:** 最初の Run から `LLM_JUDGE_COMPARE_TIMEOUT_HOURS`（既定 24 時間）を過ぎたら、揃った分だけで比較し、未提出と採点失敗を `collect.json` に記録する。比較できる方式が 2 つ未満なら比較しない
+- **評価条件の照合:** Judge のデプロイとモデルバージョン・評価器のバージョン・採点回数が異なる Run があれば `condition_mismatch` として比較せず、警告を出す。同じ条件で `llm-judge.yml` を再実行して揃える
+- **二重実行の防止:** タスクごとの `concurrency` と、比較済みの印の成果物（`llm-judge-compare-<task_id>-<ハッシュ>`）で、同じ内容を二度比較しない。ハッシュは、比較に使う Run の中身（対応表・評価データ・採点結果）と評価条件、比較側の条件（gap・ペア比較の回数・ペア比較の Judge と評価プロンプト）から作る。Run が増えた、同じ Run を採点し直した、条件を変えた場合はハッシュが変わり、比較し直す。途中で失敗した場合は印を残さず、次の起動でやり直す
 - **取りこぼしの拾い直し:** 6 時間ごとに、直近 `LLM_JUDGE_COMPARE_LOOKBACK_DAYS`（既定 14 日）に Run の成果物があり、まだ比較していないタスクを処理する
 - **人間レビュー:** `LLM_JUDGE_REVIEW_REPO`（owner/name）と、そのリポジトリに Contents / Issues の書き込み権限を持つ GitHub App（`LLM_JUDGE_REVIEW_APP_ID` とシークレット `LLM_JUDGE_REVIEW_APP_PRIVATE_KEY`）を設定すると、方式名を伏せた資料（`calibration.py export-pairs --flagged` / `export --flagged`）を `reviews/<task_id>/<成果物名>/` に置いて Issue を作る。ペア比較の対応表（`pairs_key.json`）は比較の成果物にだけ残す。レビュー用リポジトリは評価対象とは別の非公開リポジトリにし、レビュアーには評価対象リポジトリの Actions を見せない。埋めたシートは、比較の成果物の `pairwise/` と `pairs_key.json` を使って `publish_results.py --human-pair-reviews` / `--human-reviews` で送る
 - **可視化基盤:** Run ごとの結果は `llm-judge.yml` が送り済みなので、`publish_results.py --types comparison,pairwise,pair` で比較の結果だけを送る
 - **ジョブの概要:** 状態・揃った Run 数・人間レビューの件数だけを書き、方式名と勝敗は書かない
 - タスクをまたいだ方式比較（符号検定の p 値など）は対象外。全成果物を集めて `aggregate.py` / `run_pairwise.py` を実行する
+
+## Foundry Hosted Agent（評価サービス）
+
+[hosted/](hosted/) は、上の 2 つのワークフローが行う処理（採点・タスクごとの方式比較・人間レビューの振り分け）を、**実験 ID 単位の評価サービス**として Foundry の Hosted Agent（Invocations プロトコル）に載せたものです。コードとローカルでの動作確認までで、Azure へのデプロイはしていません。
+
+GitHub Actions 版との違いは次のとおりです。
+
+| | GitHub Actions 版 | 評価サービス |
+|---|---|---|
+| 評価条件 | 届いた結果どうしを照合する（`condition_mismatch`） | **実験の作成時に固定**し、採点の前後で照合する。変わっていれば採点しない |
+| 状態 | Actions の成果物 | Cosmos DB（コンテナ `service`、パーティションキー `/experiment_id`） |
+| 方式比較 | `llm-judge-compare.yml`（成果物を集める） | 採点が終わるたびに自動で比較する。判定は同じ `collect_task.merge` |
+| タスクをまたいだ比較 | 手作業 | `report` 操作（絶対評価・ペア比較の符号検定・人間の判断と Judge の一致） |
+| 人間の判断の取り込み | 手作業（`publish_results.py --human-*`） | レビュー用リポジトリの Issue を閉じると、Foundry のルーチンが取り込む |
+| モデル更新時の再評価 | 全 Run を手作業でやり直す | 新しい実験を作り、`rejudge_experiment` で同じ Run を採点し直す |
+| 呼び出し元 | GitHub Actions のみ | GitHub Actions・Azure DevOps・手元など、同じ API で呼べる |
+
+### 実験と評価条件
+
+`create_experiment` で、比較する方式・生成回数・待ち時間・gap・spread・採点回数と、**その時点の評価条件**（Judge のデプロイとモデルバージョン・評価器のバージョン・ルーブリックのハッシュ）を固定します。ルーブリックのハッシュ（`config.rubric_fingerprint()`）は、評価プロンプト・観点の定義・重み・指標の閾値から作ります。CLI 版の `run_meta.json` にも記録し、`aggregate.py` の照合にも使います。
+
+- 同じ実験の Run は、採点の前（今の条件が実験と同じか）と後（`run_meta.json` が実験と同じか）で照合し、違えば採点しない（Run は「採点失敗」になる）
+- 実験の定義は変えられない（同じ定義の作成は既存を返し、違う定義は 409）
+- Judge のモデルや評価器を更新したら新しい実験を作り（`base_experiment_id` で元の実験を記録）、`rejudge_experiment` で元の実験の Run を新しい条件で採点し直す。2 つの実験の `report` を比べれば、モデル更新の影響を同じ Run で確かめられる
+- 実験 ID はレビュー用リポジトリの Issue に載るため、方式名を含めると作成時に拒否する
+
+### 操作
+
+`POST /invocations` の本文 `{"op": ..., ...}` で呼びます。時間のかかる操作は 202 と `invocation_id` を返すので、`GET /invocations/{invocation_id}` で状態と結果を取得します。入力の仕様は `GET /invocations/docs/openapi.json` で確認できます。
+
+| op | 内容 | 応答 |
+|---|---|---|
+| `create_experiment` | 実験を作る | 200 |
+| `get_experiment` | 定義・評価条件・方式ごとの Run の状態・タスクの比較状態 | 200 |
+| `submit_run` | `make_row.py` の対応表の 1 行（`manifest`）と評価データの 1 行（`row`）を登録する。Hard Gate 不合格は記録だけ、合格なら採点を始める。同じ内容の再登録は重複させない | 200 / 202 |
+| `compare_task` | タスクの方式比較（`force` で比較済みでもやり直す） | 202 |
+| `sweep` | 止まったジョブを失敗として片付け、採点失敗の Run を採点し直し（既定 2 回まで）、全タスクの比較とレビューの取り込みを行う | 202 |
+| `ingest_reviews` | レビュー用リポジトリで閉じられた Issue の判断を取り込み、可視化基盤に送る | 202 |
+| `rejudge_experiment` | `from_experiment_id` の Run を、この実験の評価条件で採点し直す | 202 |
+| `report` | タスクをまたいだ方式比較と、人間の判断の集計 | 200 |
+| `review_packets` | レビュー用リポジトリを使わない場合のレビュー資料 | 200 |
+
+[scripts/judge_client.py](scripts/judge_client.py) から呼べます。
+
+```bash
+export LLM_JUDGE_SERVICE_AGENT=llm-judge-service
+export AZURE_AI_PROJECT_ENDPOINT=https://<account>.services.ai.azure.com/api/projects/<project>
+python scripts/judge_client.py create-experiment --experiment-id exp-2026-11 --project shoplib --variants fixed,hydrafusion
+python scripts/judge_client.py submit --experiment-id exp-2026-11 --dataset out/runs.jsonl --manifest out/manifest.jsonl --wait
+python scripts/judge_client.py call report --experiment-id exp-2026-11
+python scripts/judge_client.py call rejudge_experiment --experiment-id exp-2026-12 --param from_experiment_id=exp-2026-11 --wait
+```
+
+### GitHub Actions から使う
+
+[ci/llm-judge.yml](ci/llm-judge.yml) にリポジトリ変数 `LLM_JUDGE_SERVICE_AGENT`（エージェント名）・`LLM_JUDGE_SERVICE_PROJECT_ENDPOINT` と実験 ID（inputs の `experiment_id` か変数 `LLM_JUDGE_EXPERIMENT_ID`）を設定すると、ワークフローは指標と評価データを作ってサービスに登録し、採点の完了を待つだけになります。採点・可視化基盤への送信・方式比較はサービスが行うので、`llm-judge-compare.yml` は不要です。OIDC のアプリには Foundry プロジェクトの Azure AI User ロールが必要です。
+
+### デプロイ（未実施）
+
+1. [infra/main.bicep](infra/main.bicep) を再デプロイして Cosmos DB にコンテナ `service` を作る
+2. 評価器を登録しておく（`register_evaluators.py`）
+3. `hosted/` で azd の環境を作り、変数を設定してデプロイする。デプロイの前に [hosted/sync_kit.py](hosted/sync_kit.py) が `scripts/` と `evaluators/` をサービスのディレクトリ（`kit/`）にコピーする（azure.yaml の hooks）
+
+   ```bash
+   cd hosted
+   azd env new llm-judge
+   azd env set AZURE_AI_PROJECT_ENDPOINT https://<account>.services.ai.azure.com/api/projects/<project>
+   azd env set LLM_JUDGE_STATE_COSMOS_ENDPOINT https://<account>.documents.azure.com:443/
+   # 任意: JUDGE_DEPLOYMENT / JUDGE_MODEL_VERSION / LLM_JUDGE_MAX_JOBS / LLM_JUDGE_PUBLISH=1 と LLM_JUDGE_COSMOS_ENDPOINT /
+   #       LLM_JUDGE_APPINSIGHTS_CONNECTION_STRING / LLM_JUDGE_REVIEW_REPO と LLM_JUDGE_GITHUB_TOKEN_SECRET_URI
+   AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd deploy llm-judge-service
+   AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd deploy llm-judge-sweep
+   ```
+
+4. エージェントのマネージド ID に権限を付ける: Foundry プロジェクトの **Azure AI User**（Judge のデプロイと評価器の参照・評価の実行）、Cosmos DB の **Built-in Data Contributor**（`dataContributorPrincipalIds` に追加）、レビュー用リポジトリを使うなら Key Vault の **Key Vault Secrets User**
+5. 人間レビューをレビュー用リポジトリで受ける場合は、そのリポジトリだけに Contents / Issues の読み書き権限を持つ fine-grained token を Key Vault に置き、`LLM_JUDGE_REVIEW_REPO`・`LLM_JUDGE_GITHUB_TOKEN_SECRET_URI` を設定する。Foundry プロジェクトに GitHub の接続を作り、`LLM_JUDGE_GITHUB_CONNECTION_ID`・`LLM_JUDGE_REVIEW_REPO_OWNER`・`LLM_JUDGE_REVIEW_REPO_NAME` を設定して `azd deploy llm-judge-review-closed` でルーチンを作る
+
+azure.yaml の 2 つのルーチン:
+
+| ルーチン | トリガー | 送る操作 |
+|---|---|---|
+| `llm-judge-sweep` | 3 時間ごと（Asia/Tokyo） | `{"op": "sweep"}` |
+| `llm-judge-review-closed` | レビュー用リポジトリの Issue が閉じられた | `{"op": "ingest_reviews"}` |
+
+### ローカルで動かす
+
+```bash
+uv pip install --python .venv/bin/python azure-ai-agentserver-invocations==1.1.0 azure-keyvault-secrets "httpx<1"
+LLM_JUDGE_STATE_DIR=/tmp/llm-judge-state PORT=18088 .venv/bin/python hosted/src/llm-judge-service/main.py
+LLM_JUDGE_SERVICE_URL=http://localhost:18088 .venv/bin/python scripts/judge_client.py call get_experiment --experiment-id exp1
+```
+
+`LLM_JUDGE_STATE_COSMOS_ENDPOINT` がなければ状態はファイル（`LLM_JUDGE_STATE_DIR`）に保存します。ローカルでは `az login` の資格情報（`LLM_JUDGE_AUTH=cli`）で Foundry を呼び、Hosted Agent ではマネージド ID（azure.yaml で `LLM_JUDGE_AUTH=default`）を使います。
+
+### 注意点
+
+- **未検証のこと:** Azure へのデプロイ、ルーチン（プレビューの `azure.ai.routines` 拡張）、GitHub の Issue トリガー、Hosted Agent での時間のかかる処理（1 Run の採点は Judge を 24 回呼ぶ）の挙動は確認していません。ローカルでは、実際の Foundry プロジェクトから評価条件を読み取って実験を作り、Hard Gate 不合格の Run の登録・定期処理・方式比較・レポートまでを HTTP 越しに確認しました（採点は実行していません）
+- **中断への備え:** 採点はコンテナ内のスレッドで動かします。セッションのコンピューティングが止まると処理は中断しますが、状態は Cosmos DB にあり、`sweep` がハートビートの途絶えたジョブ（既定 45 分）を失敗として片付けて採点し直します
+- **複数のレプリカ:** 同じタスクの比較はプロセス内で直列にしています。複数のコンテナが同時に同じタスクを比較すると、ペア比較が二重に走ることがあります（結果は同じ印で記録されます）
+- **文書の大きさ:** Run の評価データ（差分など）と採点結果は 1 つの文書に入れます。Cosmos DB の上限（2 MB）を超えないよう、`make_row.py` の `--max-diff-chars` などで大きさを抑えてください
+- **ブラインド:** `get_experiment` と `report` は方式名を含むので、運用者だけが呼ぶようにしてください。レビュー用リポジトリの資料と Issue には方式名を載せません
 
 ## 可視化基盤（Azure）
 
@@ -431,6 +533,8 @@ az bicep build --file infra/main.bicep --stdout > /dev/null
 
 [tests/test_review_regressions.py](tests/test_review_regressions.py) は一時 Git リポジトリと一時評価データだけを使います。既存の評価結果は上書きせず、Azure への送信・デプロイもしません。Workbook の JSON とクエリの接続はローカルで確認しますが、実際の KQL 実行・Azure での表示確認は別途必要です。
 
+[tests/test_hosted_service.py](tests/test_hosted_service.py) は評価サービスを、Foundry・GitHub・可視化基盤を偽物に差し替えて確認します。HTTP の入口のテストは `azure-ai-agentserver-invocations` が入っている場合だけ実行します（「ローカルで動かす」の依存を入れる）。
+
 ## ファイル構成
 
 | パス | 内容 |
@@ -454,6 +558,9 @@ az bicep build --file infra/main.bicep --stdout > /dev/null
 | [datasets/](datasets/) | サンプルデータとカナリア |
 | [ci/llm-judge.yml](ci/llm-judge.yml) | GitHub Actions のテンプレート（Run ごとの評価） |
 | [ci/llm-judge-compare.yml](ci/llm-judge-compare.yml) | GitHub Actions のテンプレート（タスクごとの方式比較） |
+| [hosted/](hosted/) | 評価サービス（Foundry Hosted Agent）。`azure.yaml`（エージェントとルーチン）、`sync_kit.py`、`src/llm-judge-service/`（`main.py` HTTP の入口・`service.py` 操作・`store.py` 状態の保存先・`adapters.py` Foundry / GitHub / 可視化基盤） |
+| [scripts/judge_client.py](scripts/judge_client.py) | 評価サービスを呼ぶクライアント（CI・手元から） |
+| [scripts/azure_auth.py](scripts/azure_auth.py) | Azure の資格情報の選び方（`LLM_JUDGE_AUTH`: cli / default / managed_identity） |
 | [experiments/](experiments/) | 検証実験（検証用リポジトリ・10 タスク・Hidden test・エージェント実行ハーネス・人間用の採点資料） |
 | `results/<eval_id>/` | 試行ごとの結果、`run_meta.json`、集計結果 |
 

@@ -113,6 +113,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="results/<eval_id> と manifest（従来の形式）。--manifest 指定時は results/<eval_id> を 0 個以上")
     parser.add_argument("--manifest", type=Path, help="対応表。指定すると位置引数はすべて結果ディレクトリとして扱う")
     parser.add_argument("--out-dir", type=Path, help="summary.jsonl / variants.json の出力先（結果ディレクトリが 1 つでない場合は必須）")
+    parser.add_argument("--allow-mixed-conditions", action="store_true",
+                        help="Judge・評価器のバージョン・採点回数が異なる結果ディレクトリもまとめて集計する（既定では停止）")
     parser.add_argument("--gap", type=float, default=5, help="同じタスクで方式間の総合点（0〜100）の差がこれ未満なら人間レビュー")
     parser.add_argument("--spread", type=float, default=2, help="試行間の点差がこれ以上なら人間レビュー")
     args = parser.parse_args(argv)
@@ -129,14 +131,48 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def main() -> None:
-    args = parse_args()
-    manifest = {r["run_id"]: r for r in load_jsonl(args.manifest)}
+def evaluation_condition(results_dir: Path) -> dict | None:
+    """run_meta.json から、点数を比べてよいかを決める評価条件（Judge・評価器のバージョン・ルーブリック・採点回数）を取り出す。"""
+    path = results_dir / "run_meta.json"
+    if not path.is_file():
+        return None
+    meta = json.loads(path.read_text(encoding="utf-8"))
+    judge = meta.get("judge") or {}
+    return {
+        "judge": f"{judge.get('deployment', '')}@{judge.get('version', '')}",
+        "evaluator_versions": dict(sorted((meta.get("evaluator_versions") or {}).items())),
+        "rubric": meta.get("rubric"),
+        "repeats": meta.get("repeats"),
+    }
 
-    trials: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
+
+def check_conditions(results_dirs: list[Path], allow_mixed: bool) -> list[dict]:
+    """複数の結果ディレクトリを集計する前に、評価条件がそろっているかを確かめる。"""
+    conditions = [{"results_dir": str(d), "condition": evaluation_condition(d)} for d in results_dirs]
+    if len(results_dirs) > 1 and not allow_mixed:
+        unknown = [c["results_dir"] for c in conditions if c["condition"] is None]
+        if unknown:
+            raise SystemExit(f"run_meta.json がなく評価条件を確認できません: {unknown}"
+                             "（確認せずに集計するなら --allow-mixed-conditions）")
+        distinct = {json.dumps(c["condition"], sort_keys=True) for c in conditions}
+        if len(distinct) > 1:
+            raise SystemExit("評価条件（Judge・評価器のバージョン・ルーブリック・採点回数）が異なる結果は、同じ物差しで比べられません:\n"
+                             + "\n".join(f"  {c['results_dir']}: {json.dumps(c['condition'], ensure_ascii=False)}"
+                                         for c in conditions)
+                             + "\n同じ条件で採点し直すか、承知の上なら --allow-mixed-conditions を付けてください")
+    return conditions
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    manifest = {r["run_id"]: r for r in load_jsonl(args.manifest)}
     for results_dir in args.results_dirs:
         if not results_dir.is_dir():
             raise SystemExit(f"{results_dir}: 結果ディレクトリがありません")
+    conditions = check_conditions(args.results_dirs, args.allow_mixed_conditions)
+
+    trials: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
+    for results_dir in args.results_dirs:
         for path in sorted(results_dir.glob("trial*.jsonl")):
             for row in load_jsonl(path):
                 for r in row["results"]:
@@ -238,8 +274,8 @@ def main() -> None:
         "".join(json.dumps(s, ensure_ascii=False) + "\n" for s in runs.values()), encoding="utf-8"
     )
     (args.out_dir / "variants.json").write_text(
-        json.dumps({"variants": variant_stats, "comparisons": comparisons, "weights": WEIGHTS},
-                   ensure_ascii=False, indent=2),
+        json.dumps({"variants": variant_stats, "comparisons": comparisons, "weights": WEIGHTS,
+                    "conditions": conditions}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 

@@ -712,24 +712,90 @@ class TaskCompareTests(TemporaryTest):
         self.index = []
 
     def add_artifact(self, run_id, variant, *, task="T1", attempt=1, hard_gate="pass",
-                     created="2026-11-02T10:00:00Z", judged=True):
+                     created="2026-11-02T10:00:00Z", judged=True, judge_version="2026-09-29", score=5):
         directory = self.artifacts / f"a{len(self.index)}"
         directory.mkdir()
         write_jsonl(directory / "manifest.jsonl", [
             {"run_id": run_id, "task_id": task, "variant": variant, "attempt": attempt, "hard_gate": hard_gate}])
-        if judged and hard_gate == "pass":
+        if hard_gate == "pass":
+            # llm-judge.yml は Judge の前に評価データを作るので、採点に失敗しても runs.jsonl は残る
             write_jsonl(directory / "runs.jsonl", [
                 {"run_id": run_id, "query": "R1", "response": f"diff-{run_id}", "ci_summary": "pass"}])
+        if judged and hard_gate == "pass":
             results = directory / "results" / f"eval_{run_id}"
             results.mkdir(parents=True)
-            write_jsonl(results / "trial1.jsonl", [complete_trial(run_id)])
+            trial = complete_trial(run_id)
+            for r in trial["results"]:
+                r["score"] = score
+            write_jsonl(results / "trial1.jsonl", [trial])
+            write_json(results / "run_meta.json", {
+                "eval_id": f"eval_{run_id}", "judge": {"deployment": "judge", "version": judge_version},
+                "evaluator_versions": {"code_pr_requirements": "2"}, "repeats": 3})
         self.index.append({"name": f"llm-judge-run-{task}-{run_id}", "id": len(self.index),
                            "created_at": created, "dir": directory.name})
         write_json(self.artifacts / "_index.json", self.index)
 
-    def merge(self, variants=("a", "b"), attempts=1, timeout_hours=24):
+    def merge(self, variants=("a", "b"), attempts=1, timeout_hours=24, compare_condition=""):
         return collect_task.merge("T1", list(variants), attempts, timeout_hours, self.artifacts,
-                                  self.root / "out", self.NOW)
+                                  self.root / "out", self.NOW, compare_condition)
+
+    def test_judge_failure_is_not_counted_as_arrived(self):
+        self.add_artifact("r1", "a")
+        self.add_artifact("r2", "b", judged=False)
+        result = self.merge()
+        self.assertEqual(result["status"], "waiting")
+        self.assertEqual(result["judge_failed"], [{"variant": "b", "attempt": 1, "run_id": "r2"}])
+        # 待ち時間を過ぎても、採点結果のない Run は比較に入れない（方式が 1 つしか残らない）
+        result = self.merge(timeout_hours=1)
+        self.assertEqual((result["status"], result["pairwise"]), ("insufficient", False))
+        self.assertEqual([p["run_id"] for p in result["present"]], ["r1"])
+        self.assertEqual(collect_task.load_jsonl(self.root / "out" / "runs.jsonl")[0]["run_id"], "r1")
+        # 採点し直した成果物が届けば揃う
+        self.add_artifact("r2", "b", created="2026-11-02T11:00:00Z")
+        result = self.merge()
+        self.assertEqual((result["status"], result["judge_failed"]), ("complete", []))
+        self.assertEqual({p["state"] for p in result["present"]}, {"judged"})
+
+    def test_rejudging_the_same_run_changes_the_marker(self):
+        self.add_artifact("r1", "a")
+        self.add_artifact("r2", "b")
+        first = self.merge()["marker"]
+        self.add_artifact("r2", "b", created="2026-11-02T11:00:00Z", score=3)
+        second = self.merge()
+        self.assertEqual([p["run_id"] for p in second["present"]], ["r1", "r2"])
+        self.assertNotEqual(first, second["marker"])
+        # 比較側の条件（gap やペア比較の Judge）が変わっても比較し直す
+        self.assertNotEqual(second["marker"], self.merge(compare_condition="gap=10")["marker"])
+
+    def test_different_evaluation_conditions_are_not_compared(self):
+        self.add_artifact("r1", "a")
+        self.add_artifact("r2", "b", judge_version="2027-01-01")
+        result = self.merge()
+        self.assertEqual(result["status"], "condition_mismatch")
+        self.assertEqual(len(result["conditions"]), 2)
+        self.assertNotIn(result["status"], collect_task.READY_STATUSES)
+
+    def test_aggregate_refuses_to_mix_evaluation_conditions(self):
+        self.add_artifact("r1", "a")
+        self.add_artifact("r2", "b", judge_version="2027-01-01")
+        dirs = sorted(self.artifacts.glob("*/results/*"))
+        write_jsonl(self.root / "manifest.jsonl", [
+            {"run_id": "r1", "task_id": "T1", "variant": "a"}, {"run_id": "r2", "task_id": "T1", "variant": "b"}])
+        with self.assertRaisesRegex(SystemExit, "評価条件"):
+            invoke(aggregate, "--manifest", self.root / "manifest.jsonl", "--out-dir", self.root / "agg", *dirs)
+        invoke(aggregate, "--manifest", self.root / "manifest.jsonl", "--out-dir", self.root / "agg",
+               "--allow-mixed-conditions", *dirs)
+        conditions = json.loads((self.root / "agg" / "variants.json").read_text())["conditions"]
+        self.assertEqual({c["condition"]["judge"] for c in conditions}, {"judge@2026-09-29", "judge@2027-01-01"})
+        (dirs[0] / "run_meta.json").unlink()
+        with self.assertRaisesRegex(SystemExit, "run_meta.json"):
+            invoke(aggregate, "--manifest", self.root / "manifest.jsonl", "--out-dir", self.root / "agg", *dirs)
+
+    def test_compare_condition_includes_pairwise_judge_and_prompt(self):
+        condition = collect_task.compare_condition("gap=5")
+        self.assertTrue(condition.startswith("gap=5;"))
+        self.assertIn(f"pairwise_judge={config.JUDGE_DEPLOYMENT}@{config.JUDGE_MODEL_VERSION}", condition)
+        self.assertIn("pairwise_prompt=", condition)
 
     def test_artifact_names_identify_the_task_even_when_run_ids_have_hyphens(self):
         self.assertEqual(collect_task.artifact_task("llm-judge-run-T002-r-8f3a"), "T002")

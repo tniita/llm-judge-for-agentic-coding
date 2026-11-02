@@ -101,7 +101,8 @@ jobs:
         run: |
           python "$KIT/scripts/collect_task.py" download --task-id "$TASK_ID" --dest artifacts
           python "$KIT/scripts/collect_task.py" merge --task-id "$TASK_ID" --variants "$VARIANTS" \
-            --attempts "$ATTEMPTS" --timeout-hours "$TIMEOUT_HOURS" --artifacts artifacts --out compare
+            --attempts "$ATTEMPTS" --timeout-hours "$TIMEOUT_HOURS" --artifacts artifacts --out compare \
+            --compare-condition "gap=$GAP;pairwise_repeats=$PAIRWISE_REPEATS"
 
       - name: 比較済みか確認
         id: gate

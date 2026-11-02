@@ -12,23 +12,16 @@ from config import DATASET_FIELDS, EVALUATORS, JUDGE_DEPLOYMENT, ORDINAL_THRESHO
 from foundry_eval import run_evaluation
 
 
+def to_item(row: dict) -> dict:
+    return {"run_id": row["run_id"], **{f: row.get(f) or "なし" for f in DATASET_FIELDS}}
+
+
 def load_items(path: Path) -> list[dict]:
-    items = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            row = json.loads(line)
-            items.append({"run_id": row["run_id"], **{f: row.get(f) or "なし" for f in DATASET_FIELDS}})
-    return items
+    return [to_item(json.loads(line)) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("dataset", type=Path)
-    parser.add_argument("--repeats", type=int, default=3)
-    parser.add_argument("--name", default="code-pr-judge")
-    args = parser.parse_args()
-
-    testing_criteria = [
+def testing_criteria() -> list[dict]:
+    return [
         {
             "type": "azure_ai_evaluator",
             "name": key,
@@ -41,14 +34,32 @@ def main() -> None:
         }
         for key, spec in EVALUATORS.items()
     ]
-    run_evaluation(
-        name=args.name,
-        testing_criteria=testing_criteria,
+
+
+def evaluator_names() -> list[str]:
+    return [s["name"] for s in EVALUATORS.values()]
+
+
+def judge_rows(rows: list[dict], *, name: str, repeats: int) -> Path:
+    """評価データの行を全評価器で repeats 回採点し、results/<eval_id>/ を返す。"""
+    return run_evaluation(
+        name=name,
+        testing_criteria=testing_criteria(),
         item_fields=["run_id", *DATASET_FIELDS],
-        items=load_items(args.dataset),
-        repeats=args.repeats,
-        evaluator_names=[s["name"] for s in EVALUATORS.values()],
+        items=[to_item(r) for r in rows],
+        repeats=repeats,
+        evaluator_names=evaluator_names(),
     )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("dataset", type=Path)
+    parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--name", default="code-pr-judge")
+    args = parser.parse_args()
+    rows = [json.loads(l) for l in args.dataset.read_text(encoding="utf-8").splitlines() if l.strip()]
+    judge_rows(rows, name=args.name, repeats=args.repeats)
 
 
 if __name__ == "__main__":

@@ -15,13 +15,25 @@ run_pairwise.py / aggregate.py にそのまま渡せる形にまとめる。
 
 merge の出力（--out）:
   runs.jsonl / manifest.jsonl  比較に使う Run だけをまとめた評価データと対応表
-  results_dirs.txt             Judge 済みの Run の results/<eval_id>（aggregate.py に渡す）
-  collect.json                 判定結果。status は次のどれか
-    complete      全方式 × 全 attempt が揃った
-    timeout       待ち時間を過ぎたので、揃った分だけで比較する（missing に未提出を記録）
-    waiting       まだ揃っていない
-    insufficient  比較できる方式が 2 つ未満（揃った・待ち時間切れでも比較しない）
-    no_runs       成果物がない
+  results_dirs.txt             採点済みの Run の results/<eval_id>（aggregate.py に渡す）
+  collect.json                 判定結果
+
+Run の状態（collect.json の present[].state）:
+  judged        Hard Gate 合格、採点結果（results/<eval_id>/trial*.jsonl と run_meta.json）あり
+  gate_failed   Hard Gate 不合格（採点不要。合格率・勝敗の集計に使う）
+  judge_failed  Hard Gate 合格だが採点結果がない。届いていないものとして扱い、judge_failed に記録する
+
+status:
+  complete            全方式 × 全 attempt が judged / gate_failed で揃った
+  timeout             待ち時間を過ぎたので、揃った分だけで比較する（missing・judge_failed に記録）
+  waiting             まだ揃っていない
+  insufficient        比較できる方式が 2 つ未満（揃った・待ち時間切れでも比較しない）
+  condition_mismatch  Judge・評価器のバージョン・採点回数が異なる Run があり、同じ物差しで比べられない
+  no_runs             成果物がない
+
+比較済みの印（marker）は、比較に使う Run の中身（対応表・評価データ・採点結果）と評価条件、
+比較側の条件（--compare-condition、ペア比較の Judge と評価プロンプト）のハッシュから作る。
+同じ Run を採点し直したり条件を変えたりすると、印が変わって比較し直す。
 """
 
 import argparse
@@ -33,8 +45,12 @@ import re
 import subprocess
 import sys
 import zipfile
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from aggregate import evaluation_condition  # noqa: E402
 
 RUN_PREFIX = "llm-judge-run-"
 COMPARE_PREFIX = "llm-judge-compare-"
@@ -129,12 +145,47 @@ def cmd_download(args) -> None:
 
 # ---------- 判定とまとめ ----------
 
+def sha256_json(value) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def find_judged_results(directory: Path, run_id: str) -> Path | None:
+    """成果物の results/<eval_id>/ のうち、この Run の採点結果と run_meta.json がそろっているもの。"""
+    for results_dir in sorted((directory / "results").glob("*/")):
+        if not (results_dir / "run_meta.json").is_file():
+            continue
+        for trial in sorted(results_dir.glob("trial*.jsonl")):
+            if any(r.get("datasource_item", {}).get("run_id") == run_id for r in load_jsonl(trial)):
+                return results_dir
+    return None
+
+
+def judge_state(run: dict) -> str:
+    """gate_failed: Hard Gate 不合格（採点不要） / judged: 採点済み / judge_failed: 合格したが採点結果がない"""
+    if run["manifest"].get("hard_gate", "pass") != "pass":
+        return "gate_failed"
+    return "judged" if run["dataset"] is not None and run["results_dir"] is not None else "judge_failed"
+
+
+def run_fingerprint(run: dict) -> dict:
+    """比較済みかを判定するための、Run の中身と評価条件の要約。採点し直すと変わる。"""
+    results_dir = run["results_dir"]
+    return {
+        "run_id": run["manifest"]["run_id"],
+        "manifest": sha256_json(run["manifest"]),
+        "dataset": sha256_json(run["dataset"]) if run["dataset"] is not None else None,
+        "trials": [hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(results_dir.glob("trial*.jsonl"))]
+        if results_dir else [],
+        "condition": evaluation_condition(results_dir) if results_dir else None,
+    }
+
+
 def merge(task_id: str, variants: list[str], attempts: int, timeout_hours: float,
-          artifacts_dir: Path, out_dir: Path, now: datetime) -> dict:
+          artifacts_dir: Path, out_dir: Path, now: datetime, compare_condition: str = "") -> dict:
     index = json.loads((artifacts_dir / "_index.json").read_text(encoding="utf-8"))
     notes = []
 
-    # run_id ごとに最新の成果物を採用する（同じ Run の再実行）
+    # run_id ごとに最新の成果物を採用する（同じ Run の再実行・採点し直し）
     latest: dict[str, dict] = {}
     for entry in index:
         directory = artifacts_dir / entry["dir"]
@@ -147,7 +198,8 @@ def merge(task_id: str, variants: list[str], attempts: int, timeout_hours: float
         for m in load_jsonl(manifest_path):
             if m.get("task_id") != task_id:
                 continue
-            candidate = {"manifest": m, "dataset": dataset.get(m["run_id"]), "dir": directory,
+            candidate = {"manifest": m, "dataset": dataset.get(m["run_id"]),
+                         "results_dir": find_judged_results(directory, m["run_id"]),
                          "created_at": parse_time(entry["created_at"]), "artifact": entry["name"]}
             current = latest.get(m["run_id"])
             if current is None or candidate["created_at"] > current["created_at"]:
@@ -170,36 +222,57 @@ def merge(task_id: str, variants: list[str], attempts: int, timeout_hours: float
         cells[key] = run
     if ignored:
         notes.append(f"比較対象外の方式または attempt の Run を無視: {ignored}")
+    for run in cells.values():
+        run["state"] = judge_state(run)
 
+    # 採点に失敗した Run は「まだ届いていない」と扱う（llm-judge.yml を再実行すれば採点し直せる）
     expected = [(v, a) for v in variants for a in range(1, attempts + 1)]
+    arrived = [cells[k] for k in expected if k in cells and cells[k]["state"] != "judge_failed"]
+    judge_failed = [{"variant": v, "attempt": a, "run_id": cells[(v, a)]["manifest"]["run_id"]}
+                    for v, a in expected if (v, a) in cells and cells[(v, a)]["state"] == "judge_failed"]
     missing = [{"variant": v, "attempt": a} for v, a in expected if (v, a) not in cells]
-    chosen = [cells[k] for k in expected if k in cells]
-    first_seen = min((r["created_at"] for r in chosen), default=None)
+    first_seen = min((r["created_at"] for r in cells.values()), default=None)
 
-    if not chosen:
+    if not cells:
         status = "no_runs"
-    elif not missing:
+    elif not missing and not judge_failed:
         status = "complete"
     elif now - first_seen >= timedelta(hours=timeout_hours):
         status = "timeout"
     else:
         status = "waiting"
-    if status in READY_STATUSES and len({r["manifest"]["variant"] for r in chosen}) < 2:
+    if status in READY_STATUSES and len({r["manifest"]["variant"] for r in arrived}) < 2:
         status = "insufficient"
 
+    # 異なる物差し（Judge・評価器のバージョン・採点回数）で採点した Run は比べない
+    conditions = defaultdict(list)
+    for r in arrived:
+        if r["state"] == "judged":
+            conditions[json.dumps(evaluation_condition(r["results_dir"]), sort_keys=True)].append(
+                r["manifest"]["run_id"])
+    if status in READY_STATUSES and len(conditions) > 1:
+        status = "condition_mismatch"
+        notes.append("評価条件が異なる Run があります。同じ条件で llm-judge.yml を再実行してください: "
+                     + "; ".join(f"{runs} → {c}" for c, runs in conditions.items()))
+    if judge_failed:
+        notes.append(f"採点結果がない Run（llm-judge.yml の再実行が必要）: {[j['run_id'] for j in judge_failed]}")
+
     out_dir.mkdir(parents=True, exist_ok=True)
-    manifest_rows = [r["manifest"] for r in chosen]
-    dataset_rows = [r["dataset"] for r in chosen if r["dataset"] is not None]
+    manifest_rows = [r["manifest"] for r in arrived]
+    dataset_rows = [r["dataset"] for r in arrived if r["state"] == "judged"]
     write_jsonl(out_dir / "manifest.jsonl", manifest_rows)
     write_jsonl(out_dir / "runs.jsonl", dataset_rows)
-    results_dirs = sorted({str(p.parent) for r in chosen for p in (r["dir"] / "results").glob("*/trial*.jsonl")})
+    results_dirs = sorted({str(r["results_dir"]) for r in arrived if r["state"] == "judged"})
     (out_dir / "results_dirs.txt").write_text("".join(f"{d}\n" for d in results_dirs), encoding="utf-8")
 
-    run_ids = sorted(m["run_id"] for m in manifest_rows)
-    fingerprint = hashlib.sha256(json.dumps([task_id, run_ids]).encode()).hexdigest()[:16]
+    # 比較に使う Run の中身・評価条件と、比較側の条件（gap・ペア比較の Judge と評価器など）から作る
+    fingerprint = sha256_json({
+        "task_id": task_id,
+        "runs": sorted((run_fingerprint(r) for r in arrived), key=lambda f: f["run_id"]),
+        "compare_condition": compare_condition,
+    })[:16]
     pairwise = False
     if status in READY_STATUSES:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
         from run_pairwise import build_pairs  # 組の作り方を run_pairwise.py と一致させる
         pairwise = bool(build_pairs({r["run_id"]: r for r in dataset_rows}, manifest_rows))
 
@@ -210,9 +283,13 @@ def merge(task_id: str, variants: list[str], attempts: int, timeout_hours: float
         "attempts": attempts,
         "present": [{"variant": r["manifest"]["variant"], "attempt": int(r["manifest"].get("attempt") or 1),
                      "run_id": r["manifest"]["run_id"], "hard_gate": r["manifest"].get("hard_gate", "pass"),
-                     "judged": r["dataset"] is not None, "artifact": r["artifact"]} for r in chosen],
+                     "state": r["state"], "eval_id": r["results_dir"].name if r["results_dir"] else None,
+                     "artifact": r["artifact"]} for r in arrived],
         "missing": missing,
+        "judge_failed": judge_failed,
         "superseded": superseded,
+        "conditions": [{"condition": json.loads(c), "run_ids": runs} for c, runs in conditions.items()],
+        "compare_condition": compare_condition,
         "first_seen": first_seen.isoformat() if first_seen else None,
         "fingerprint": fingerprint,
         "marker": f"{COMPARE_PREFIX}{task_id}-{fingerprint}",
@@ -224,15 +301,26 @@ def merge(task_id: str, variants: list[str], attempts: int, timeout_hours: float
     return collect
 
 
+def compare_condition(extra: str) -> str:
+    """比較側の評価条件。ペア比較の Judge・評価プロンプトや gap が変われば、同じ Run の組でも比較し直す。"""
+    from config import JUDGE_DEPLOYMENT, JUDGE_MODEL_VERSION, build_pairwise_prompt
+    prompt = hashlib.sha256(build_pairwise_prompt().encode()).hexdigest()[:16]
+    return f"{extra};pairwise_judge={JUDGE_DEPLOYMENT}@{JUDGE_MODEL_VERSION};pairwise_prompt={prompt}"
+
+
 def cmd_merge(args) -> None:
     variants = [v.strip() for v in args.variants.split(",") if v.strip()]
     if len(variants) < 2:
         raise SystemExit("--variants には比較する方式を 2 つ以上指定してください")
     now = parse_time(args.now) if args.now else datetime.now(timezone.utc)
-    c = merge(args.task_id, variants, args.attempts, args.timeout_hours, args.artifacts, args.out, now)
-    print(f"{c['task_id']}: {c['status']}（揃った Run {len(c['present'])} / 未提出 {len(c['missing'])}）")
+    c = merge(args.task_id, variants, args.attempts, args.timeout_hours, args.artifacts, args.out, now,
+              compare_condition(args.compare_condition))
+    print(f"{c['task_id']}: {c['status']}（揃った Run {len(c['present'])} / 未提出 {len(c['missing'])}"
+          f" / 採点結果なし {len(c['judge_failed'])}）")
     for note in c["notes"]:
         print(f"  - {note}")
+    if os.environ.get("GITHUB_ACTIONS") and (c["status"] == "condition_mismatch" or c["judge_failed"]):
+        print(f"::warning::{c['task_id']}: " + " / ".join(c["notes"]))
     if os.environ.get("GITHUB_OUTPUT"):
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
             f.write(f"status={c['status']}\nready={str(c['status'] in READY_STATUSES).lower()}\n"
@@ -262,6 +350,7 @@ def main() -> None:
     m.add_argument("--timeout-hours", type=float, default=24, help="最初の Run からこの時間を過ぎたら揃った分だけで比較する")
     m.add_argument("--artifacts", type=Path, required=True, help="download の出力先")
     m.add_argument("--out", type=Path, required=True)
+    m.add_argument("--compare-condition", default="", help="比較側の条件（例: gap=5;pairwise_repeats=1）。変われば比較し直す")
     m.add_argument("--now", help="現在時刻（ISO 8601。テスト用）")
     m.set_defaults(func=cmd_merge)
 

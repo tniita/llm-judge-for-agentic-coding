@@ -14,6 +14,10 @@
 # - task_id は英数字・_・. だけ（ハイフン不可）、run_id は英数字・_・.・- だけを使う（成果物名から task_id を取り出すため）
 # - リポジトリ変数 LLM_JUDGE_COMPARE_VARIANTS（例: fixed,hydrafusion）を設定すると、終了時に llm-judge-compare.yml を起動し、
 #   同じタスクの全方式が揃っていれば方式どうしを比較する
+# - 評価サービス（Foundry Hosted Agent、hosted/）を使う場合は、リポジトリ変数 LLM_JUDGE_SERVICE_AGENT（エージェント名）と
+#   LLM_JUDGE_SERVICE_PROJECT_ENDPOINT、実験 ID（inputs.experiment_id か変数 LLM_JUDGE_EXPERIMENT_ID）を設定する。
+#   このとき採点・可視化基盤への送信・方式比較はサービスが行い、このワークフローは評価データを作って登録するだけになる
+#   （OIDC のアプリには Foundry プロジェクトの Azure AI User ロールが必要。llm-judge-compare.yml は不要）
 name: llm-judge
 
 on:
@@ -33,6 +37,7 @@ on:
       tokens_out: { default: "" }
       cost_usd: { default: "" }
       duration_sec: { default: "" }
+      experiment_id: { description: "評価サービスの実験 ID（空なら変数 LLM_JUDGE_EXPERIMENT_ID）", default: "" }
 
 permissions:
   id-token: write
@@ -61,12 +66,17 @@ jobs:
       TOKENS_OUT: ${{ inputs.tokens_out }}
       COST_USD: ${{ inputs.cost_usd }}
       DURATION_SEC: ${{ inputs.duration_sec }}
+      EXPERIMENT_ID: ${{ inputs.experiment_id || vars.LLM_JUDGE_EXPERIMENT_ID }}
+      SERVICE_AGENT: ${{ vars.LLM_JUDGE_SERVICE_AGENT }}
     steps:
       # 成果物名 llm-judge-run-<task_id>-<run_id> から task_id を一意に取り出せるよう、使える文字を制限する
       - name: ID を検証
         run: |
           [[ "$TASK_ID" =~ ^[A-Za-z0-9_.]+$ ]] || { echo "::error::task_id には英数字・_・. だけを使ってください"; exit 1; }
           [[ "$RUN_ID" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "::error::run_id には英数字・_・.・- だけを使ってください"; exit 1; }
+          if [ -n "$SERVICE_AGENT" ]; then
+            [[ "$EXPERIMENT_ID" =~ ^[A-Za-z0-9_.-]{1,64}$ ]] || { echo "::error::評価サービスを使うには実験 ID（英数字・_・.・-）が必要です"; exit 1; }
+          fi
 
       - uses: actions/checkout@v4
         with:
@@ -141,14 +151,14 @@ jobs:
             --dataset out/runs.jsonl --manifest out/manifest.jsonl "${extra[@]}"
 
       - uses: azure/login@v2
-        if: env.HARD_GATE == 'pass' || vars.LLM_JUDGE_PROJECT != ''
+        if: env.HARD_GATE == 'pass' || vars.LLM_JUDGE_PROJECT != '' || vars.LLM_JUDGE_SERVICE_AGENT != ''
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Judge を実行（Hard Gate 合格時のみ）
-        if: env.HARD_GATE == 'pass'
+        if: env.HARD_GATE == 'pass' && vars.LLM_JUDGE_SERVICE_AGENT == ''
         run: |
           set -o pipefail
           python "$KIT/scripts/run_eval.py" out/runs.jsonl --repeats 3 --name "judge-$RUN_ID" | tee out/run_eval.txt
@@ -161,9 +171,22 @@ jobs:
           mkdir -p out/results
           cp -r "$results_dir" out/results/
 
+      # Hard Gate 不合格の試行も登録する（合格率・コストの集計と、方式比較の「揃った」の判定に使う）
+      # 採点・可視化基盤への送信・方式比較・人間レビューの振り分けはサービスが行う
+      - name: 評価サービスに登録して採点を待つ（LLM_JUDGE_SERVICE_AGENT 設定時）
+        if: vars.LLM_JUDGE_SERVICE_AGENT != ''
+        env:
+          AZURE_AI_PROJECT_ENDPOINT: ${{ vars.LLM_JUDGE_SERVICE_PROJECT_ENDPOINT }}
+          LLM_JUDGE_SERVICE_AGENT: ${{ vars.LLM_JUDGE_SERVICE_AGENT }}
+        run: |
+          extra=()
+          [ -f out/runs.jsonl ] && extra+=(--dataset out/runs.jsonl)
+          python "$KIT/scripts/judge_client.py" --session-id "llm-judge-$EXPERIMENT_ID" \
+            submit --experiment-id "$EXPERIMENT_ID" --manifest out/manifest.jsonl "${extra[@]}" --wait --timeout 5400
+
       # Hard Gate 不合格の試行も送る（合格率・コストの集計に使う）
       - name: 可視化基盤に送信（設定されている場合のみ）
-        if: vars.LLM_JUDGE_PROJECT != ''
+        if: vars.LLM_JUDGE_PROJECT != '' && vars.LLM_JUDGE_SERVICE_AGENT == ''
         env:
           LLM_JUDGE_COSMOS_ENDPOINT: ${{ vars.LLM_JUDGE_COSMOS_ENDPOINT }}
           APPLICATIONINSIGHTS_CONNECTION_STRING: ${{ secrets.APPLICATIONINSIGHTS_CONNECTION_STRING }}
@@ -182,6 +205,6 @@ jobs:
 
       # 全方式が揃っていなければ llm-judge-compare.yml は何もせず終わる（揃ったかは向こうで判定する）
       - name: タスク単位の方式比較を起動
-        if: always() && vars.LLM_JUDGE_COMPARE_VARIANTS != ''
+        if: always() && vars.LLM_JUDGE_COMPARE_VARIANTS != '' && vars.LLM_JUDGE_SERVICE_AGENT == ''
         continue-on-error: true
         run: gh workflow run llm-judge-compare.yml --ref "$GITHUB_REF_NAME" -f task_id="$TASK_ID"

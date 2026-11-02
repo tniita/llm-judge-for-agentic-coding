@@ -164,8 +164,14 @@ def main() -> None:
     pairs = build_pairs(dataset, load_jsonl(args.manifest))
     if not pairs:
         raise SystemExit("比較できる組がありません（同じタスクに 2 方式以上の合格 Run が必要）")
+    out_dir = judge_pairs(pairs, dataset, name=args.name, repeats=args.repeats)
+    aggregate(out_dir, pairs)
+
+
+def judge_pairs(pairs: list[dict], dataset: dict[str, dict], *, name: str, repeats: int) -> Path:
+    """組を A/B 両方の順序で採点し、results/<eval_id>/（pairs.json を含む）を返す。集計は aggregate() で行う。"""
     out_dir = run_evaluation(
-        name=args.name,
+        name=name,
         testing_criteria=[{
             "type": "azure_ai_evaluator",
             "name": "pairwise",
@@ -175,11 +181,11 @@ def main() -> None:
         }],
         item_fields=["pair_key", *PAIRWISE["fields"]],
         items=to_items(pairs, dataset),
-        repeats=args.repeats,
+        repeats=repeats,
         evaluator_names=[PAIRWISE["name"]],
     )
     (out_dir / "pairs.json").write_text(json.dumps(pairs, ensure_ascii=False, indent=2), encoding="utf-8")
-    aggregate(out_dir, pairs)
+    return out_dir
 
 
 if __name__ == "__main__":

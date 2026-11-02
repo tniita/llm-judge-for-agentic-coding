@@ -1,17 +1,20 @@
+import hashlib
+import json
 import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PROMPT_DIR = ROOT / "evaluators"
+# Hosted Agent のコンテナなど、キットの置き場所に書き込めない環境では LLM_JUDGE_RESULTS_DIR で変える
+RESULTS_DIR = Path(os.environ.get("LLM_JUDGE_RESULTS_DIR") or ROOT / "results")
 
-PROJECT_ENDPOINT = os.environ.get(
-    "AZURE_AI_PROJECT_ENDPOINT",
-    "https://foundry-claude-tniita.services.ai.azure.com/api/projects/proj-default",
-)
+# FOUNDRY_PROJECT_ENDPOINT は Foundry の Hosted Agent のコンテナに自動で設定される
+PROJECT_ENDPOINT = (os.environ.get("AZURE_AI_PROJECT_ENDPOINT") or os.environ.get("FOUNDRY_PROJECT_ENDPOINT")
+                    or "https://foundry-claude-tniita.services.ai.azure.com/api/projects/proj-default")
 # 評価対象（Claude 系）と別系統にして自己選好バイアスを避ける
-JUDGE_DEPLOYMENT = os.environ.get("JUDGE_DEPLOYMENT", "gpt-6.1-sol")
+JUDGE_DEPLOYMENT = os.environ.get("JUDGE_DEPLOYMENT") or "gpt-6.1-sol"
 # デプロイのモデルが自動更新されると採点基準がずれるため、想定と違えば実行を止める
-JUDGE_MODEL_VERSION = os.environ.get("JUDGE_MODEL_VERSION", "2026-09-29")
+JUDGE_MODEL_VERSION = os.environ.get("JUDGE_MODEL_VERSION") or "2026-09-29"
 
 FOUNDRY_PREVIEW_HEADERS = {"Foundry-Features": "Evaluations=V1Preview"}
 
@@ -166,3 +169,20 @@ def build_pairwise_prompt() -> str:
     rubric = (PROMPT_DIR / "pairwise.md").read_text(encoding="utf-8").strip()
     result_desc = f"<{PAIRWISE['min']} から {PAIRWISE['max']} の整数>"
     return f"{rubric}\n\n# 入力\n\n{_inputs_block(PAIRWISE['fields'])}\n\n{_output_block(result_desc)}\n"
+
+
+def rubric_fingerprint() -> str:
+    """採点の物差しのうち、キット側で決まるもの（評価プロンプト・観点の定義・重み・指標の閾値）のハッシュ。
+
+    評価器のバージョンは Foundry に登録した時点のプロンプトを表すが、重みや閾値（集計の仕方）は含まない。
+    両方を評価条件として記録し、異なる条件で採点した結果を同じ物差しで比べないようにする。
+    """
+    spec = {
+        "prompts": {key: build_prompt(key) for key in EVALUATORS},
+        "pairwise": build_pairwise_prompt(),
+        "evaluators": EVALUATORS,
+        "weights": WEIGHTS,
+        "metric_thresholds": METRIC_THRESHOLDS,
+        "ordinal": [ORDINAL_MIN, ORDINAL_MAX, ORDINAL_THRESHOLD],
+    }
+    return hashlib.sha256(json.dumps(spec, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]

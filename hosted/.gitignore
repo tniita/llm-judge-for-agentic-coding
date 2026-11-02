@@ -1,0 +1,4 @@
+src/llm-judge-service/kit/
+src/llm-judge-service/.state/
+src/llm-judge-service/.env
+.azure/
