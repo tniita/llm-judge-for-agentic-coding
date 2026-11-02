@@ -931,7 +931,7 @@ class Service:
 OPENAPI_SPEC = {
     "openapi": "3.0.3",
     "info": {"title": "LLM Judge service", "version": "1.0.0",
-             "description": "コーディングエージェントの PR を実験単位で採点・比較する。詳細は README の「Foundry Hosted Agent」"},
+             "description": "コーディングエージェントの PR を実験単位で採点・比較する。詳細は docs/hosted-service.md"},
     "paths": {
         "/invocations": {"post": {
             "requestBody": {"required": True, "content": {"application/json": {"schema": {

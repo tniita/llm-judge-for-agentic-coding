@@ -3,7 +3,7 @@
 # LLM Judge の評価サービスを、既存の Foundry プロジェクトに Hosted Agent（Invocations プロトコル）としてデプロイする。
 # Judge のモデルデプロイ（JUDGE_DEPLOYMENT）と評価器（scripts/register_evaluators.py）は登録済みの前提。
 #
-# 手順（README の「Foundry Hosted Agent」）:
+# 手順（docs/hosted-service.md）:
 #   cd hosted
 #   azd env new <env> && azd env set AZURE_AI_PROJECT_ENDPOINT ... （ほかの変数も同様）
 #   AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd deploy
