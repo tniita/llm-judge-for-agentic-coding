@@ -10,7 +10,7 @@ dependencies = [
     "azure-identity==1.27.0",
     "azure-cosmos==4.17.1",
     "azure-keyvault-secrets==4.12.0",
-    "openai==3.36.1",
+    "openai==3.42.1",
     # OpenTelemetry の openai 計装が httpx を import する（Foundry のサンプルと同じ）
     "httpx<1",
 ]
