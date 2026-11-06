@@ -1,0 +1,30 @@
+{
+  "eval_id": "eval_b55f944b76d34825bb08e97b24ad8448",
+  "name": "opus55-vs-fusion",
+  "created_at": "2026-11-06T03:33:36.303755+00:00",
+  "project_endpoint": "https://foundry-claude-tniita.services.ai.azure.com/api/projects/proj-default",
+  "judge": {
+    "deployment": "gpt-6.1-sol",
+    "model": "gpt-6.1-sol",
+    "version": "2026-09-29"
+  },
+  "evaluator_versions": {
+    "code_pr_requirements": "3",
+    "code_pr_test_quality": "2",
+    "code_pr_design": "3",
+    "code_pr_maintainability": "2",
+    "code_pr_change_scope": "3",
+    "code_pr_robustness": "3",
+    "code_pr_explanation": "2",
+    "code_pr_uncaught_critical": "3"
+  },
+  "rubric": "62ab75177382b7d6",
+  "repeats": 3,
+  "items": 19,
+  "run_ids": [
+    "evalrun_67d7cc9006af4ba8b0e7931172bbe248",
+    "evalrun_ecf6b23c36564cab9dbf04c9420763a2",
+    "evalrun_9196d055d7114cbaa10cfd64f34bbbf9"
+  ],
+  "report_url": "https://ai.azure.com/nextgen/r/zraOVILMR6qZmhiCH1bPVA,anything,,Foundry-Claude-tniita,proj-default/build/evaluations/eval_b55f944b76d34825bb08e97b24ad8448/run/evalrun_67d7cc9006af4ba8b0e7931172bbe248"
+}

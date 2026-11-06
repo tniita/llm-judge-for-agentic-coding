@@ -1,0 +1,168 @@
+{
+  "variants": {
+    "copilot-fusion": {
+      "attempts": 10,
+      "hard_gate_pass_rate": 0.9,
+      "judged_runs": 9,
+      "judge_same_family_rate": 1.0,
+      "mean_total": 93.12169312169311,
+      "mean_req_met_rate": 1.0,
+      "mean_scores": {
+        "requirements": 5.0,
+        "test_quality": 3.7777777777777777,
+        "design": 5.0,
+        "maintainability": 4.777777777777778,
+        "change_scope": 5.0,
+        "robustness": 4.555555555555555,
+        "explanation": 4.888888888888889
+      },
+      "critical_rate": 0.0,
+      "mean_tokens_in": 58069.3,
+      "mean_tokens_out": 2536.6,
+      "mean_cost_usd": 0.0020339931500000003,
+      "mean_duration_sec": 88.73197637250004,
+      "mean_metrics_delta": {
+        "complexity_total": 5.888888888888889,
+        "duplicated_lines": 0.0,
+        "duplication_rate": 0.0,
+        "coupling_edges": 0.2222222222222222,
+        "mean_instability": 0.004960317460317464,
+        "propagation_cost": -0.008857709750566893,
+        "modularity": 0.0
+      }
+    },
+    "opus-5.5": {
+      "attempts": 10,
+      "hard_gate_pass_rate": 1.0,
+      "judged_runs": 10,
+      "judge_same_family_rate": 0.0,
+      "mean_total": 92.66666666666666,
+      "mean_req_met_rate": 0.9845238095238095,
+      "mean_scores": {
+        "requirements": 4.8,
+        "test_quality": 4.2,
+        "design": 4.9,
+        "maintainability": 4.9,
+        "change_scope": 4.6,
+        "robustness": 4.5,
+        "explanation": 4.9
+      },
+      "critical_rate": 0.0,
+      "mean_tokens_in": 82648.3,
+      "mean_tokens_out": 4549.0,
+      "mean_cost_usd": 0.16713114,
+      "mean_duration_sec": 86.4877301610998,
+      "mean_metrics_delta": {
+        "complexity_total": 7.8,
+        "duplicated_lines": 0.0,
+        "duplication_rate": 0.0,
+        "coupling_edges": 0.4,
+        "mean_instability": 0.02410714285714286,
+        "propagation_cost": -0.012244897959183673,
+        "modularity": 0.0
+      }
+    }
+  },
+  "comparisons": [
+    {
+      "a": "copilot-fusion",
+      "b": "opus-5.5",
+      "wins_a": 3,
+      "wins_b": 5,
+      "ties": 2,
+      "p_value_sign_test": 0.7265625,
+      "mean_total_diff": -0.7407407407407397,
+      "tasks": [
+        {
+          "task_id": "T01",
+          "outcome": "tie",
+          "total_a": 96.19047619047619,
+          "total_b": 96.19047619047619
+        },
+        {
+          "task_id": "T02",
+          "outcome": "b",
+          "total_a": 96.19047619047619,
+          "total_b": 100.0
+        },
+        {
+          "task_id": "T03",
+          "outcome": "tie",
+          "total_a": 96.19047619047619,
+          "total_b": 96.19047619047619
+        },
+        {
+          "task_id": "T04",
+          "outcome": "a",
+          "total_a": 88.57142857142857,
+          "total_b": 84.76190476190476
+        },
+        {
+          "task_id": "T05",
+          "outcome": "a",
+          "total_a": 90.47619047619048,
+          "total_b": 84.76190476190476
+        },
+        {
+          "task_id": "T06",
+          "outcome": "b",
+          "total_a": 92.38095238095238,
+          "total_b": 96.19047619047619
+        },
+        {
+          "task_id": "T07",
+          "outcome": "b_only_passed",
+          "total_a": null,
+          "total_b": 81.9047619047619
+        },
+        {
+          "task_id": "T08",
+          "outcome": "b",
+          "total_a": 96.19047619047619,
+          "total_b": 100.0
+        },
+        {
+          "task_id": "T09",
+          "outcome": "a",
+          "total_a": 91.42857142857143,
+          "total_b": 90.47619047619048
+        },
+        {
+          "task_id": "T10",
+          "outcome": "b",
+          "total_a": 90.47619047619048,
+          "total_b": 96.19047619047619
+        }
+      ]
+    }
+  ],
+  "weights": {
+    "requirements": 3,
+    "test_quality": 2,
+    "robustness": 2,
+    "design": 1,
+    "maintainability": 1,
+    "change_scope": 1,
+    "explanation": 0.5
+  },
+  "conditions": [
+    {
+      "results_dir": "results/eval_b55f944b76d34825bb08e97b24ad8448",
+      "condition": {
+        "judge": "gpt-6.1-sol@2026-09-29",
+        "evaluator_versions": {
+          "code_pr_change_scope": "3",
+          "code_pr_design": "3",
+          "code_pr_explanation": "2",
+          "code_pr_maintainability": "2",
+          "code_pr_requirements": "3",
+          "code_pr_robustness": "3",
+          "code_pr_test_quality": "2",
+          "code_pr_uncaught_critical": "3"
+        },
+        "rubric": "62ab75177382b7d6",
+        "repeats": 3
+      }
+    }
+  ]
+}

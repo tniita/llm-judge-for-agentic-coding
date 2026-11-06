@@ -1,0 +1,22 @@
+{
+  "eval_id": "eval_852c82965da54bafac35acdd80dd2be1",
+  "name": "opus55-vs-fusion-pairwise",
+  "created_at": "2026-11-06T03:33:14.177584+00:00",
+  "project_endpoint": "https://foundry-claude-tniita.services.ai.azure.com/api/projects/proj-default",
+  "judge": {
+    "deployment": "gpt-6.1-sol",
+    "model": "gpt-6.1-sol",
+    "version": "2026-09-29"
+  },
+  "evaluator_versions": {
+    "code_pr_pairwise": "2"
+  },
+  "rubric": "62ab75177382b7d6",
+  "repeats": 2,
+  "items": 18,
+  "run_ids": [
+    "evalrun_8d7a7d04f0bc4f4bbc705e014c1cad37",
+    "evalrun_40e9d81c4f804167bc580fd8582e6ed9"
+  ],
+  "report_url": "https://ai.azure.com/nextgen/r/zraOVILMR6qZmhiCH1bPVA,anything,,Foundry-Claude-tniita,proj-default/build/evaluations/eval_852c82965da54bafac35acdd80dd2be1/run/evalrun_8d7a7d04f0bc4f4bbc705e014c1cad37"
+}

@@ -1,0 +1,224 @@
+{
+  "pairs": [
+    {
+      "pair_id": "P001",
+      "task_id": "T01",
+      "variant_a": "copilot-fusion",
+      "run_a": "r-cb8a7309",
+      "variant_b": "opus-5.5",
+      "run_b": "r-b07113c9",
+      "models_a": [
+        "gpt-6-luna"
+      ],
+      "models_b": [
+        "claude-opus-5.5"
+      ],
+      "pref_order1": -0.5,
+      "pref_order2": -1.0,
+      "pref": -0.75,
+      "position_inconsistent": false,
+      "judge_same_family": {
+        "a": [],
+        "b": []
+      },
+      "human_review": []
+    },
+    {
+      "pair_id": "P002",
+      "task_id": "T02",
+      "variant_a": "copilot-fusion",
+      "run_a": "r-24811667",
+      "variant_b": "opus-5.5",
+      "run_b": "r-8b57e4d4",
+      "models_a": [
+        "gpt-6-luna"
+      ],
+      "models_b": [
+        "claude-opus-5.5"
+      ],
+      "pref_order1": -0.5,
+      "pref_order2": -0.5,
+      "pref": -0.5,
+      "position_inconsistent": false,
+      "judge_same_family": {
+        "a": [],
+        "b": []
+      },
+      "human_review": []
+    },
+    {
+      "pair_id": "P003",
+      "task_id": "T03",
+      "variant_a": "copilot-fusion",
+      "run_a": "r-37792c2f",
+      "variant_b": "opus-5.5",
+      "run_b": "r-6692033d",
+      "models_a": [
+        "gpt-6-luna"
+      ],
+      "models_b": [
+        "claude-opus-5.5"
+      ],
+      "pref_order1": -0.5,
+      "pref_order2": -0.5,
+      "pref": -0.5,
+      "position_inconsistent": false,
+      "judge_same_family": {
+        "a": [],
+        "b": []
+      },
+      "human_review": []
+    },
+    {
+      "pair_id": "P004",
+      "task_id": "T04",
+      "variant_a": "copilot-fusion",
+      "run_a": "r-0742b366",
+      "variant_b": "opus-5.5",
+      "run_b": "r-d94816f8",
+      "models_a": [
+        "gpt-6-luna"
+      ],
+      "models_b": [
+        "claude-opus-5.5"
+      ],
+      "pref_order1": 0.0,
+      "pref_order2": 0.0,
+      "pref": 0.0,
+      "position_inconsistent": false,
+      "judge_same_family": {
+        "a": [],
+        "b": []
+      },
+      "human_review": []
+    },
+    {
+      "pair_id": "P005",
+      "task_id": "T05",
+      "variant_a": "copilot-fusion",
+      "run_a": "r-09780a56",
+      "variant_b": "opus-5.5",
+      "run_b": "r-902ccc31",
+      "models_a": [
+        "gpt-6-luna"
+      ],
+      "models_b": [
+        "claude-opus-5.5"
+      ],
+      "pref_order1": -0.5,
+      "pref_order2": -0.5,
+      "pref": -0.5,
+      "position_inconsistent": false,
+      "judge_same_family": {
+        "a": [],
+        "b": []
+      },
+      "human_review": []
+    },
+    {
+      "pair_id": "P006",
+      "task_id": "T06",
+      "variant_a": "copilot-fusion",
+      "run_a": "r-1c0f8d89",
+      "variant_b": "opus-5.5",
+      "run_b": "r-cf496258",
+      "models_a": [
+        "gpt-6-luna"
+      ],
+      "models_b": [
+        "claude-opus-5.5"
+      ],
+      "pref_order1": -0.5,
+      "pref_order2": -0.5,
+      "pref": -0.5,
+      "position_inconsistent": false,
+      "judge_same_family": {
+        "a": [],
+        "b": []
+      },
+      "human_review": []
+    },
+    {
+      "pair_id": "P007",
+      "task_id": "T08",
+      "variant_a": "copilot-fusion",
+      "run_a": "r-4e498e9d",
+      "variant_b": "opus-5.5",
+      "run_b": "r-74e1c019",
+      "models_a": [
+        "gpt-6-luna"
+      ],
+      "models_b": [
+        "claude-opus-5.5"
+      ],
+      "pref_order1": -0.5,
+      "pref_order2": -0.5,
+      "pref": -0.5,
+      "position_inconsistent": false,
+      "judge_same_family": {
+        "a": [],
+        "b": []
+      },
+      "human_review": []
+    },
+    {
+      "pair_id": "P008",
+      "task_id": "T09",
+      "variant_a": "copilot-fusion",
+      "run_a": "r-3aac3133",
+      "variant_b": "opus-5.5",
+      "run_b": "r-86cdbe8c",
+      "models_a": [
+        "gpt-6-luna"
+      ],
+      "models_b": [
+        "claude-opus-5.5"
+      ],
+      "pref_order1": -0.5,
+      "pref_order2": -0.5,
+      "pref": -0.5,
+      "position_inconsistent": false,
+      "judge_same_family": {
+        "a": [],
+        "b": []
+      },
+      "human_review": []
+    },
+    {
+      "pair_id": "P009",
+      "task_id": "T10",
+      "variant_a": "copilot-fusion",
+      "run_a": "r-a4d608e5",
+      "variant_b": "opus-5.5",
+      "run_b": "r-9a643559",
+      "models_a": [
+        "gpt-6-luna"
+      ],
+      "models_b": [
+        "claude-opus-5.5"
+      ],
+      "pref_order1": -0.5,
+      "pref_order2": -0.5,
+      "pref": -0.5,
+      "position_inconsistent": false,
+      "judge_same_family": {
+        "a": [],
+        "b": []
+      },
+      "human_review": []
+    }
+  ],
+  "comparisons": [
+    {
+      "a": "copilot-fusion",
+      "b": "opus-5.5",
+      "wins_a": 0,
+      "wins_b": 8,
+      "ties": 1,
+      "mean_pref_a": -0.4722222222222222,
+      "p_value_sign_test": 0.0078125
+    }
+  ],
+  "position_bias": 0.027777777777777776,
+  "judge": "grok-4.7"
+}

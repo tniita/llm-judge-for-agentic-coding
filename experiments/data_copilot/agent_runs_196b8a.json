@@ -1,0 +1,42 @@
+[
+  {
+    "run_id": "r-b07113c9",
+    "task_id": "T01",
+    "variant": "opus-5.5",
+    "attempt": 1,
+    "hard_gate": "pass",
+    "visible": "20 passed in 0.02s",
+    "hidden": "9 passed in 0.01s",
+    "lint": 0,
+    "cost_usd": 0.1855264,
+    "turns": 5,
+    "denials": 0,
+    "agent_error": null,
+    "models_used": [
+      "claude-opus-5.5"
+    ],
+    "make_row": [
+      "r-b07113c9: 追加しました（差分 5,076 文字）"
+    ]
+  },
+  {
+    "run_id": "r-cb8a7309",
+    "task_id": "T01",
+    "variant": "copilot-fusion",
+    "attempt": 1,
+    "hard_gate": "pass",
+    "visible": "12 passed in 0.02s",
+    "hidden": "9 passed in 0.03s",
+    "lint": 0,
+    "cost_usd": 0.002118403,
+    "turns": 6,
+    "denials": 0,
+    "agent_error": null,
+    "models_used": [
+      "gpt-6-luna"
+    ],
+    "make_row": [
+      "r-cb8a7309: 追加しました（差分 3,532 文字）"
+    ]
+  }
+]
