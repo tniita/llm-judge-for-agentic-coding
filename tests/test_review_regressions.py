@@ -16,6 +16,7 @@ import aggregate
 import calibration
 import collect_task
 import config
+import foundry_eval
 import make_row
 import metrics
 import publish_results
@@ -517,6 +518,150 @@ class PairwiseRoutingTests(TemporaryTest):
                    for r in ("r1", "r2")}
         with self.assertRaisesRegex(SystemExit, "Skill"):
             run_pairwise.to_items([self.pair], dataset)
+
+
+class RateLimitRetryTests(unittest.TestCase):
+    @staticmethod
+    def row(key, status="completed", message=""):
+        result = {"name": "x", "status": status, "score": 5 if status == "completed" else None}
+        if message:
+            result["sample"] = {"error": {"code": "FAILED_EXECUTION", "message": message}}
+        return {"datasource_item": {"run_id": key}, "results": [result]}
+
+    def test_only_transient_errors_are_rejudged_and_replaced(self):
+        rows = [self.row("r1"), self.row("r2", "error", "Error code: 429 - RateLimitReached"),
+                self.row("r3", "error", "Error code: 404 - api_not_supported"),
+                self.row("r4", "error", "Request timed out.")]
+        calls = []
+
+        def rejudge(failed):
+            calls.append([r["datasource_item"]["run_id"] for r in failed])
+            return [self.row(r["datasource_item"]["run_id"]) for r in failed]
+
+        with patch.object(foundry_eval.time, "sleep"), contextlib.redirect_stdout(io.StringIO()):
+            out, retried = foundry_eval.retry_transient(rows, "run_id", rejudge, retries=3, wait_sec=1)
+        self.assertEqual(calls, [["r2", "r4"]])
+        self.assertEqual(retried, 2)
+        self.assertEqual([r["results"][0]["status"] for r in out], ["completed", "completed", "error", "completed"])
+
+    def test_retries_stop_at_the_limit_and_keep_the_error(self):
+        rows = [self.row("r1", "error", "429")]
+        with patch.object(foundry_eval.time, "sleep") as sleep, contextlib.redirect_stdout(io.StringIO()):
+            out, retried = foundry_eval.retry_transient(rows, "run_id", lambda failed: failed, retries=2, wait_sec=10)
+        self.assertEqual(retried, 2)
+        self.assertTrue(foundry_eval.transient_error(out[0]))
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [10, 20])
+        with contextlib.redirect_stdout(io.StringIO()):
+            _, retried = foundry_eval.retry_transient(rows, "run_id", lambda failed: failed, retries=0, wait_sec=1)
+        self.assertEqual(retried, 0)
+
+
+class SelfPreferenceTests(TemporaryTest):
+    """評価対象が Judge と同系統のモデルを使ったときの扱い。"""
+
+    def test_model_family_handles_hosts_routers_and_lookalikes(self):
+        cases = {
+            "gpt-6.1-sol": "openai", "gpt-6-luna": "openai", "o4-mini": "openai", "gpt-oss-120b": "openai",
+            "claude-opus-5.5": "anthropic", "claude-opus-5-5": "anthropic", "grok-4.7": "xai",
+            "FW-Kimi-K3": "moonshot", "Meta-Llama-3.3-70B-Instruct": "meta", "DeepSeek-V4-Pro": "deepseek",
+            "Mistral-Large-3": "mistral", "MAI-Thinking-1": "microsoft", "Phi-4": "microsoft",
+            "fusion": None, "model-router": None, "Microsoft-Decision-1": None, "openings": None, "": None,
+        }
+        for name, family in cases.items():
+            self.assertEqual(config.model_family(name), family, name)
+        self.assertEqual(config.same_family_models(["gpt-6-luna", "claude-opus-5.5"], "gpt-6.1-sol"), ["gpt-6-luna"])
+        self.assertEqual(config.same_family_models(None, "gpt-6.1-sol"), [])
+        self.assertEqual(config.same_family_models(["fusion"], "model-router"), [])
+
+    def test_agent_models_go_to_manifest_and_are_redacted_from_dataset(self):
+        task, ci, diff = self.root / "task.md", self.root / "ci.txt", self.root / "pr.diff"
+        task.write_text("R1: x", encoding="utf-8")
+        ci.write_text("pass", encoding="utf-8")
+        diff.write_text("diff --git a/a.py b/a.py\n+# tuned for grok-4.7\n", encoding="utf-8")
+        invoke(make_row, "--run-id", "r1", "--task-id", "T1", "--variant", "v", "--task", task, "--ci", ci,
+               "--diff", diff, "--agent-models", "grok-4.7, claude-opus-5.5",
+               "--dataset", self.root / "runs.jsonl", "--manifest", self.root / "manifest.jsonl")
+        manifest = json.loads((self.root / "manifest.jsonl").read_text())
+        self.assertEqual(manifest["agent_models"], ["grok-4.7", "claude-opus-5.5"])
+        row = (self.root / "runs.jsonl").read_text()
+        self.assertNotIn("agent_models", row)
+        self.assertNotIn("grok", row)
+
+    def absolute(self, totals, models, judge="gpt-6.1-sol"):
+        out = self.root / "abs"
+        out.mkdir(exist_ok=True)
+        write_json(out / "run_meta.json", {"judge": {"deployment": judge, "model": judge, "version": "1"}})
+        trials = []
+        for run_id, score in totals.items():
+            trial = complete_trial(run_id)
+            for r in trial["results"]:
+                r["score"] = score
+            trials.append(trial)
+        write_jsonl(out / "trial1.jsonl", trials)
+        manifest = [{"run_id": r, "task_id": "T1", "variant": r, "attempt": 1, "hard_gate": "pass",
+                     **({"agent_models": models[r]} if models.get(r) else {})} for r in totals]
+        write_jsonl(self.root / "manifest.jsonl", manifest)
+        invoke(aggregate, out, self.root / "manifest.jsonl", "--gap", "0")
+        summary = {s["run_id"]: s for s in collect_task.load_jsonl(out / "summary.jsonl")}
+        return summary, json.loads((out / "variants.json").read_text())["variants"]
+
+    def test_absolute_win_by_same_family_side_goes_to_human_review(self):
+        summary, variants = self.absolute({"fus": 5, "opus": 4}, {"fus": ["gpt-6-luna"], "opus": ["claude-opus-5.5"]})
+        for s in summary.values():
+            self.assertTrue(any("自己選好" in r and "gpt-6-luna" in r for r in s["human_review"]), s)
+        self.assertEqual(summary["fus"]["judge_same_family"], ["gpt-6-luna"])
+        self.assertEqual((variants["fus"]["judge_same_family_rate"], variants["opus"]["judge_same_family_rate"]),
+                         (1.0, 0.0))
+
+    def test_absolute_win_against_same_family_side_or_unknown_models_is_not_flagged(self):
+        summary, _ = self.absolute({"fus": 4, "opus": 5}, {"fus": ["gpt-6-luna"], "opus": ["claude-opus-5.5"]})
+        self.assertFalse(any("自己選好" in r for s in summary.values() for r in s["human_review"]))
+        summary, variants = self.absolute({"fus": 5, "opus": 4}, {})
+        self.assertFalse(any("自己選好" in r for s in summary.values() for r in s["human_review"]))
+        self.assertIsNone(variants["fus"]["judge_same_family_rate"])
+        summary, _ = self.absolute({"fus": 5, "opus": 4}, {"fus": ["gpt-6-luna"], "opus": ["claude-opus-5.5"]},
+                                   judge="grok-4.7")
+        self.assertFalse(any("自己選好" in r for s in summary.values() for r in s["human_review"]))
+
+    def pairwise(self, score_order1, models_a, models_b, judge="gpt-6.1-sol"):
+        write_json(self.root / "run_meta.json", {"judge": {"deployment": judge, "model": judge}})
+        write_jsonl(self.root / "trial1.jsonl", [
+            {"datasource_item": {"pair_key": "P001-1"},
+             "results": [{"score": score_order1, "reason": "[confidence: high] x"}]},
+            {"datasource_item": {"pair_key": "P001-2"},
+             "results": [{"score": 6 - score_order1, "reason": "[confidence: high] x"}]},
+        ])
+        manifest = [{"run_id": "r1", "task_id": "T1", "variant": "a", "hard_gate": "pass", "agent_models": models_a},
+                    {"run_id": "r2", "task_id": "T1", "variant": "b", "hard_gate": "pass", "agent_models": models_b}]
+        write_jsonl(self.root / "manifest.jsonl", manifest)
+        pairs = run_pairwise.build_pairs({"r1": {}, "r2": {}}, manifest)
+        with contextlib.redirect_stdout(io.StringIO()):
+            run_pairwise.aggregate(self.root, pairs)
+        return json.loads((self.root / "pairwise_summary.json").read_text())
+
+    def test_pair_favoring_same_family_side_goes_to_human_review(self):
+        # 順序 1 で 1 点 = A（r1）が優位
+        summary = self.pairwise(1, ["gpt-6-luna"], ["claude-opus-5.5"])
+        pair = summary["pairs"][0]
+        self.assertEqual(pair["models_a"], ["gpt-6-luna"])
+        self.assertEqual(pair["judge_same_family"], {"a": ["gpt-6-luna"], "b": []})
+        self.assertTrue(any("自己選好" in r for r in pair["human_review"]))
+        self.assertEqual(summary["judge"], "gpt-6.1-sol")
+
+    def test_pair_favoring_other_family_or_with_cross_family_judge_is_not_flagged(self):
+        self.assertEqual(self.pairwise(5, ["gpt-6-luna"], ["claude-opus-5.5"])["pairs"][0]["human_review"], [])
+        self.assertEqual(self.pairwise(1, ["gpt-6-luna"], ["claude-opus-5.5"], judge="grok-4.7")
+                         ["pairs"][0]["human_review"], [])
+        # 両方とも同系統ならバイアスは両側にかかるので、片側だけを疑う理由にはしない
+        self.assertEqual(self.pairwise(1, ["gpt-6-luna"], ["gpt-5.6-sol"])["pairs"][0]["human_review"], [])
+
+    def test_aggregate_only_mode_reads_models_from_manifest(self):
+        write_json(self.root / "pairs.json", [PairwiseRoutingTests.pair])
+        self.pairwise(1, ["gpt-6-luna"], ["claude-opus-5.5"])
+        write_jsonl(self.root / "runs.jsonl", [])
+        invoke(run_pairwise, self.root / "runs.jsonl", self.root / "manifest.jsonl", "--results-dir", self.root)
+        pair = json.loads((self.root / "pairwise_summary.json").read_text())["pairs"][0]
+        self.assertTrue(any("自己選好" in r for r in pair["human_review"]))
 
 
 class HumanDecisionTests(TemporaryTest):

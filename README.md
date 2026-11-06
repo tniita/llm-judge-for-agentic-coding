@@ -59,7 +59,7 @@ flowchart LR
 ### 前提
 
 - Foundry プロジェクト: `Foundry-Claude-tniita/proj-default`（変更は環境変数 `AZURE_AI_PROJECT_ENDPOINT`）
-- Judge: `gpt-6.1-sol`（モデルバージョン `2026-09-29` で固定チェック）。評価対象（Claude 系）と別系統にして自己選好バイアスを避けている
+- Judge: `gpt-6.1-sol`（モデルバージョン `2026-09-29` で固定チェック）。評価対象（Claude 系）と別系統にして自己選好バイアスを避けている。モデルを内部で選ぶ方式（HydraFusion・Copilot Fusion など）は Judge と同系統のモデルを使うことがあるため、使ったモデルを `make_row.py --agent-models` で記録すると、同系統の側を優位とした判定を人間レビューに回す。別系統の Judge では `JUDGE_DEPLOYMENT` / `JUDGE_MODEL_VERSION` を切り替えて採点し直す（「[評価の設計](docs/evaluation-design.md#評価の信頼性を保つ仕組み)」）
 - 実行ユーザーにプロジェクトの **Azure AI User** 以上のロール
 - `az login` 済みで、アクティブなサブスクリプションがプロジェクトと同じテナントにあること
 

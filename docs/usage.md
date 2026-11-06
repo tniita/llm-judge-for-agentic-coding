@@ -56,6 +56,7 @@ Run ごとに [scripts/make_row.py](../scripts/make_row.py) を実行します�
 | `--metrics-error` | `metrics.py` が失敗したときの理由。指標は計測不能として記録し、人間レビューに回す（`--metrics` とは併用不可） |
 | `--skills` | プロジェクトの Skill（Markdown のディレクトリまたはファイル）。`README.md` と HTML コメントは除く。`--max-skills-chars`（既定 40,000 文字）で切り詰める |
 | `--tokens-in` ほか | Run 全体の入力・出力トークン数、コスト、所要時間。実行基盤で集計した usage を入れる。未計測なら省略（0 にしない） |
+| `--agent-models` | エージェントが実際に使ったモデル（カンマ区切り）。対応表にだけ記録し、Judge と同系統かの確認に使う。評価データではこのモデル名も伏せる |
 
 `make_row.py` は次の処理を自動で行います。
 
@@ -69,6 +70,8 @@ Run ごとに [scripts/make_row.py](../scripts/make_row.py) を実行します�
 ```
 
 8 つの評価器で 3 回ずつ採点し、`results/<eval_id>/` に保存します。最後に表示される `portal:` の URL から Foundry ポータルで結果を一覧できます。
+
+Judge の一時的なエラー（レート制限 429・タイムアウト・5xx）で失敗した項目は、待ち時間を延ばしながら試行ごとに採点し直します（`LLM_JUDGE_RETRIES`、既定 5 回。待ち時間は `LLM_JUDGE_RETRY_WAIT_SEC` × 回数、既定 60 秒）。TPM の小さい Judge では `LLM_JUDGE_RETRY_BATCH` で 1 回の実行に入れる項目数を絞ります（例: 絶対評価は 1、ペア比較は 4）。採点し直した件数と、それでも残った件数は `run_meta.json` の `transient_retries` に記録され、残った項目は評価エラーとして人間レビューに回ります。同じ Judge で複数の採点を同時に流すと制限に当たりやすいため、順番に実行してください。
 
 ## 5. 集計
 

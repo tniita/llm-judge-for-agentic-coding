@@ -13,6 +13,12 @@
 
 エージェントが使えるのはファイル操作と、venv の pytest / ruff の実行だけです（それ以外のコマンドは拒否されます）。
 
+GitHub Copilot CLI で `claude-opus-5.5`（`opus-5.5`）と Copilot Fusion（`copilot-fusion`）を比べる場合は `--agent copilot` を付けます。`--metrics` で指標の差分を、`--skills` で Skill（エージェントと Judge の両方に渡す）を評価データに含めます。コストは Copilot の AI クレジット（1 クレジット = $0.01）から換算します。Fusion が実際に使ったモデルは対応表の `agent_models` に記録され（`experiments/work/<run_id>/agent.json` の `models_used` にも残る）、Judge と同系統なら集計で警告します。
+
+```bash
+.venv/bin/python experiments/run_agents.py --agent copilot --out-dir experiments/data_copilot --metrics --skills project_skills --workers 4
+```
+
 ## 結果（2026-10-22、各方式 10 タスク × 1 回）
 
 Judge は `gpt-6.1-sol`（`2026-09-29`）です。絶対評価は 3 回採点（[eval_486c…](../results/eval_486c5635e38a4d768d9ef2fddfb8a692/)）、ペア比較は A/B 入れ替え × 2 回（[eval_0c63…](../results/eval_0c63f1696c2b4124833c8e72535d568b/)）です。

@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -11,7 +12,8 @@ RESULTS_DIR = Path(os.environ.get("LLM_JUDGE_RESULTS_DIR") or ROOT / "results")
 # FOUNDRY_PROJECT_ENDPOINT は Foundry の Hosted Agent のコンテナに自動で設定される
 PROJECT_ENDPOINT = (os.environ.get("AZURE_AI_PROJECT_ENDPOINT") or os.environ.get("FOUNDRY_PROJECT_ENDPOINT")
                     or "https://foundry-claude-tniita.services.ai.azure.com/api/projects/proj-default")
-# 評価対象（Claude 系）と別系統にして自己選好バイアスを避ける
+# 評価対象と別系統にして自己選好バイアスを避ける。モデルを内部で選ぶ方式（ルーター）は同系統を使うことがあるため、
+# make_row.py --agent-models で実際に使ったモデルを記録すると、集計で同系統の側を優位とした判定を人間レビューに回す
 JUDGE_DEPLOYMENT = os.environ.get("JUDGE_DEPLOYMENT") or "gpt-6.1-sol"
 # デプロイのモデルが自動更新されると採点基準がずれるため、想定と違えば実行を止める
 JUDGE_MODEL_VERSION = os.environ.get("JUDGE_MODEL_VERSION") or "2026-09-29"
@@ -138,6 +140,41 @@ METRIC_LABELS = {
     "propagation_cost": "ΔPC",
     "modularity": "ΔQ",
 }
+
+
+# モデルの系統（提供元）。モデル名の先頭で判定する。Judge と同系統の評価対象は自己選好バイアスを受けうる
+MODEL_FAMILIES = {
+    "openai": r"gpt|o\d|chatgpt|codex",
+    "anthropic": r"claude",
+    "google": r"gemini|gemma",
+    "xai": r"grok",
+    "meta": r"llama|muse",
+    "mistral": r"mistral|ministral|codestral|devstral|magistral",
+    "deepseek": r"deepseek",
+    "microsoft": r"phi|mai",
+    "alibaba": r"qwen",
+    "moonshot": r"kimi",
+    "zhipu": r"glm",
+    "cohere": r"cohere|command",
+}
+_HOST_PREFIX_RE = re.compile(r"^(fw|microsoft|meta|xai|openai|anthropic|google|azure)[-/_.]")
+
+
+def model_family(name: str | None) -> str | None:
+    """モデル名（デプロイ名）から系統を返す。判定できなければ None（ルーターの "fusion" など）。"""
+    n = (name or "").strip().lower()
+    while m := _HOST_PREFIX_RE.match(n):
+        n = n[m.end():]
+    for family, pattern in MODEL_FAMILIES.items():
+        if re.match(rf"(?:{pattern})(?![a-z])", n):
+            return family
+    return None
+
+
+def same_family_models(agent_models: list[str] | None, judge_model: str | None) -> list[str]:
+    """評価対象が使ったモデルのうち、Judge と同じ系統のもの。"""
+    family = model_family(judge_model)
+    return [m for m in agent_models or [] if family and model_family(m) == family]
 
 
 def _output_block(result_desc: str) -> str:

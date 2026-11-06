@@ -15,6 +15,9 @@
 機械的な指標とプロジェクトの Skill も渡す場合:
   python scripts/metrics.py --repo path/to/repo --base main --head agent-branch --out metrics.json
   python scripts/make_row.py ... --metrics metrics.json --skills project_skills/
+
+実際に使ったモデルを記録する場合（対応表にだけ残し、Judge と同系統かの確認に使う。評価データでは伏せる）:
+  python scripts/make_row.py ... --agent-models claude-opus-5.5,gpt-6-luna
 """
 
 import argparse
@@ -135,6 +138,8 @@ def main() -> None:
     p.add_argument("--tokens-out", type=float)
     p.add_argument("--cost-usd", type=float)
     p.add_argument("--duration-sec", type=float)
+    p.add_argument("--agent-models", default="",
+                   help="エージェントが実際に使ったモデル（カンマ区切り）。対応表にだけ記録し、Judge と同系統かの確認に使う")
     p.add_argument("--metrics", type=Path, help="metrics.py の出力（metrics.json）。Judge には差分（Δ）だけを渡す")
     p.add_argument("--metrics-error", help="metrics.py が失敗したときの理由。指標は計測不能として扱い、人間レビューに回す")
     p.add_argument("--skills", type=Path, help="プロジェクトの Skill（Markdown のディレクトリまたはファイル）")
@@ -156,6 +161,9 @@ def main() -> None:
     for key in ("tokens_in", "tokens_out", "cost_usd", "duration_sec"):
         if getattr(args, key) is not None:
             manifest_row[key] = getattr(args, key)
+    agent_models = [m.strip() for m in args.agent_models.split(",") if m.strip()]
+    if agent_models:
+        manifest_row["agent_models"] = agent_models
     if args.metrics and args.metrics_error:
         raise SystemExit("--metrics と --metrics-error は同時に指定できません")
     metrics = json.loads(args.metrics.read_text(encoding="utf-8")) if args.metrics else None
@@ -194,7 +202,8 @@ def main() -> None:
                              "同じ base/head で metrics.py と差分を作り直してください")
     diff, excluded, omitted = shape_diff(diff, args.max_diff_chars)
 
-    terms = DEFAULT_TERMS + [re.escape(args.variant)] + [t for t in args.redact_terms.split(",") if t]
+    terms = (DEFAULT_TERMS + [re.escape(args.variant)] + [re.escape(m) for m in agent_models]
+             + [t for t in args.redact_terms.split(",") if t])
     pattern = re.compile(r"\b(" + "|".join(terms) + r")\b", re.IGNORECASE)
 
     fields = {

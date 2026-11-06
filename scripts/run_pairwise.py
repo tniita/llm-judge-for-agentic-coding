@@ -13,8 +13,8 @@ from collections import defaultdict
 from itertools import combinations
 from pathlib import Path
 
-from aggregate import CONFIDENCE_RE
-from config import JUDGE_DEPLOYMENT, PAIRWISE
+from aggregate import CONFIDENCE_RE, judge_model, self_preference_reason
+from config import JUDGE_DEPLOYMENT, PAIRWISE, same_family_models
 from foundry_eval import run_evaluation
 from stats_utils import fmt, mean, sign_test
 
@@ -38,11 +38,21 @@ def build_pairs(dataset: dict[str, dict], manifest: list[dict]) -> list[dict]:
             runs_a = sorted(by_cell.get((task, va), []), key=lambda m: m.get("attempt", 1))
             runs_b = sorted(by_cell.get((task, vb), []), key=lambda m: m.get("attempt", 1))
             for ra, rb in zip(runs_a, runs_b):
-                pairs.append({
+                pair = {
                     "pair_id": f"P{len(pairs) + 1:03d}", "task_id": task,
                     "variant_a": va, "run_a": ra["run_id"], "variant_b": vb, "run_b": rb["run_id"],
-                })
+                }
+                pairs.append(with_agent_models(pair, {ra["run_id"]: ra, rb["run_id"]: rb}))
     return pairs
+
+
+def with_agent_models(pair: dict, manifest: dict[str, dict]) -> dict:
+    """対応表に記録された、各 Run が実際に使ったモデルを組に付ける（Judge と同系統かの確認に使う）。"""
+    for side in ("a", "b"):
+        models = (manifest.get(pair[f"run_{side}"]) or {}).get("agent_models")
+        if models and f"models_{side}" not in pair:
+            pair = {**pair, f"models_{side}": models}
+    return pair
 
 
 def to_items(pairs: list[dict], dataset: dict[str, dict]) -> list[dict]:
@@ -87,6 +97,7 @@ def aggregate(results_dir: Path, pairs: list[dict]) -> None:
                 prefs[pair_id][order].append(pref)
 
     pair_rows = []
+    judge = judge_model(results_dir)
     for p in pairs:
         pid = p["pair_id"]
         o1, o2 = mean(prefs[pid]["1"]), mean(prefs[pid]["2"])
@@ -103,8 +114,14 @@ def aggregate(results_dir: Path, pairs: list[dict]) -> None:
             reasons.append(f"ペア比較: confidence が low の判定あり（順序 {', '.join(sorted(low_confidence[pid]))}）")
         # 両方の順序がそろったときだけ優劣を確定する（片方だけでは位置バイアスを含む）
         combined = None if missing else mean([o1, o2])
+        same = {side: same_family_models(p.get(f"models_{side}"), judge) for side in ("a", "b")}
+        if combined:
+            favored, other = ("a", "b") if combined > 0 else ("b", "a")
+            # 同系統の側を優位とした判定だけを疑う（逆向きなら、バイアスがあっても結論は保守的になる）
+            if same[favored] and not same[other]:
+                reasons.append(f"ペア比較: {self_preference_reason(same[favored])}")
         pair_rows.append({**p, "pref_order1": o1, "pref_order2": o2, "pref": combined,
-                          "position_inconsistent": inconsistent, "human_review": reasons})
+                          "position_inconsistent": inconsistent, "judge_same_family": same, "human_review": reasons})
 
     by_task = defaultdict(list)
     for r in pair_rows:
@@ -127,6 +144,7 @@ def aggregate(results_dir: Path, pairs: list[dict]) -> None:
         ],
         # 正なら先に提示された方を選びやすい（位置バイアス）
         "position_bias": mean([v / 2 for v in raw_first]),
+        "judge": judge,
     }
     (results_dir / "pairwise_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -143,6 +161,11 @@ def aggregate(results_dir: Path, pairs: list[dict]) -> None:
               f"/ 優位度の平均 {fmt(c['mean_pref_a'], 2)}（+1 で {c['a']} が常に明確に優位）"
               f"/ 符号検定 p={c['p_value_sign_test']:.3f}")
     print(f"位置バイアス: {fmt(summary['position_bias'], 2)}（0 に近いほど良い。正なら先に提示された方を選びやすい）")
+    with_same = [r for r in pair_rows if r["judge_same_family"]["a"] or r["judge_same_family"]["b"]]
+    if with_same:
+        favored = sum(1 for r in with_same if any("自己選好" in x for x in r["human_review"]))
+        print(f"Judge（{judge}）と同系統のモデルを使った組: {len(with_same)}/{len(pair_rows)}"
+              f"（うち同系統の側を優位と判定し人間レビューに回した組: {favored}）")
     print(f"→ {results_dir / 'pairwise_summary.json'}")
 
 
@@ -158,7 +181,9 @@ def main() -> None:
     dataset = {r["run_id"]: r for r in load_jsonl(args.dataset)}
 
     if args.results_dir:
-        aggregate(args.results_dir, json.loads((args.results_dir / "pairs.json").read_text(encoding="utf-8")))
+        manifest = {m["run_id"]: m for m in load_jsonl(args.manifest)}
+        pairs = json.loads((args.results_dir / "pairs.json").read_text(encoding="utf-8"))
+        aggregate(args.results_dir, [with_agent_models(p, manifest) for p in pairs])
         return
 
     pairs = build_pairs(dataset, load_jsonl(args.manifest))

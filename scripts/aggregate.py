@@ -8,6 +8,7 @@
 manifest は run_id → task_id / variant / attempt / hard_gate / コストの対応表。Judge には渡さず、ここでだけ使う。
 Hard Gate 不合格の Run も manifest に入れておくと、合格率とコストを集計できる。
 manifest に機械的な指標の差分（make_row.py --metrics）があれば、config.py の METRIC_THRESHOLDS を超えて悪化した Run を人間レビューに回す。
+manifest にエージェントが使ったモデル（make_row.py --agent-models）があれば、Judge と同系統の側を優位とした判定を人間レビューに回す。
 
 出力（--out-dir を指定した場合はそのディレクトリ）:
   results/<eval_id>/summary.jsonl   Run ごとの結果
@@ -22,7 +23,14 @@ from collections import Counter, defaultdict
 from itertools import combinations
 from pathlib import Path
 
-from config import EVALUATORS, METRIC_LABELS, METRIC_THRESHOLDS, ORDINAL_MAX, WEIGHTS
+from config import (
+    EVALUATORS,
+    METRIC_LABELS,
+    METRIC_THRESHOLDS,
+    ORDINAL_MAX,
+    WEIGHTS,
+    same_family_models,
+)
 from stats_utils import fmt, mean, sign_test
 
 ORDINAL_KEYS = [k for k, s in EVALUATORS.items() if s["scoring"] == "ordinal"]
@@ -146,6 +154,20 @@ def evaluation_condition(results_dir: Path) -> dict | None:
     }
 
 
+def judge_model(results_dir: Path) -> str | None:
+    """run_meta.json に記録された Judge のモデル名（無ければデプロイ名）。"""
+    path = results_dir / "run_meta.json"
+    if not path.is_file():
+        return None
+    judge = json.loads(path.read_text(encoding="utf-8")).get("judge") or {}
+    return judge.get("model") or judge.get("deployment")
+
+
+def self_preference_reason(models: list[str]) -> str:
+    return (f"Judge と同系統のモデル（{', '.join(sorted(set(models)))}）で生成した側を優位と判定"
+            "（自己選好バイアスの可能性）")
+
+
 def check_conditions(results_dirs: list[Path], allow_mixed: bool) -> list[dict]:
     """複数の結果ディレクトリを集計する前に、評価条件がそろっているかを確かめる。"""
     conditions = [{"results_dir": str(d), "condition": evaluation_condition(d)} for d in results_dirs]
@@ -170,13 +192,18 @@ def main(argv: list[str] | None = None) -> None:
         if not results_dir.is_dir():
             raise SystemExit(f"{results_dir}: 結果ディレクトリがありません")
     conditions = check_conditions(args.results_dirs, args.allow_mixed_conditions)
+    judges = {d: judge_model(d) for d in args.results_dirs}
 
     trials: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
+    judged_by: dict[str, set[str]] = defaultdict(set)
     for results_dir in args.results_dirs:
         for path in sorted(results_dir.glob("trial*.jsonl")):
             for row in load_jsonl(path):
+                run_id = row["datasource_item"]["run_id"]
+                if judges[results_dir]:
+                    judged_by[run_id].add(judges[results_dir])
                 for r in row["results"]:
-                    trials[row["datasource_item"]["run_id"]][r["name"]].append(r)
+                    trials[run_id][r["name"]].append(r)
 
     runs = {}
     for run_id, by_key in trials.items():
@@ -189,6 +216,8 @@ def main(argv: list[str] | None = None) -> None:
         s["metrics_delta"] = meta.get("metrics_delta")
         s["metrics_status"] = meta.get("metrics_status")
         s["metrics_errors"] = meta.get("metrics_errors", {})
+        s["agent_models"] = meta.get("agent_models")
+        s["judge_same_family"] = sorted({m for j in judged_by[run_id] for m in same_family_models(s["agent_models"], j)})
         if s["metrics_status"] == "unavailable" or s["metrics_errors"]:
             s["metrics_delta"] = None
             s["human_review"].append("機械的な品質指標が計測不能: " + json.dumps(s["metrics_errors"], ensure_ascii=False))
@@ -213,6 +242,9 @@ def main(argv: list[str] | None = None) -> None:
     def cell_passed(task, variant):
         return sum(1 for a in cells[(task, variant)]["attempts"] if a.get("hard_gate", "pass") == "pass")
 
+    def cell_same_family(task, variant):
+        return sorted({m for s in cells[(task, variant)]["judged"] for m in s["judge_same_family"]})
+
     # タスクごとの方式間比較。片方しか合格しなかったタスクは合格した方の勝ちとする
     comparisons = []
     for a, b in combinations(variants, 2):
@@ -233,6 +265,12 @@ def main(argv: list[str] | None = None) -> None:
                 if abs(diff) < args.gap:
                     for s in cells[(task, a)]["judged"] + cells[(task, b)]["judged"]:
                         s["human_review"].append(f"{task}: 方式間の総合点差 {abs(diff):.1f} < {args.gap:g}")
+                # 同系統の側を優位とした判定だけを疑う（逆向きなら、バイアスがあっても結論は保守的になる）
+                winner, loser = (a, b) if diff > 0 else (b, a)
+                favored = cell_same_family(task, winner)
+                if diff != 0 and favored and not cell_same_family(task, loser):
+                    for s in cells[(task, a)]["judged"] + cells[(task, b)]["judged"]:
+                        s["human_review"].append(f"{task}: {self_preference_reason(favored)}")
             elif ta is not None and pb == 0:
                 outcome, wins = "a_only_passed", wins + 1
             elif tb is not None and pa == 0:
@@ -252,10 +290,13 @@ def main(argv: list[str] | None = None) -> None:
         attempts = [a for (t, vv), c in cells.items() if vv == v for a in c["attempts"]]
         judged = [s for (t, vv), c in cells.items() if vv == v for s in c["judged"]]
         passed = sum(1 for a in attempts if a.get("hard_gate", "pass") == "pass")
+        known = [s for s in judged if s["agent_models"]]
         variant_stats[v] = {
             "attempts": len(attempts),
             "hard_gate_pass_rate": passed / len(attempts) if attempts else None,
             "judged_runs": len(judged),
+            # 使ったモデルが記録された Run のうち、Judge と同系統のモデルを使った割合
+            "judge_same_family_rate": mean([1.0 if s["judge_same_family"] else 0.0 for s in known]),
             "mean_total": mean([s["total"] for s in judged if s["total"] is not None]),
             "mean_req_met_rate": mean([s["req_met_rate"] for s in judged if s["req_met_rate"] is not None]),
             "mean_scores": {k: mean([s["scores"][k] for s in judged if k in s["scores"]]) for k in ORDINAL_KEYS},
@@ -303,6 +344,12 @@ def main(argv: list[str] | None = None) -> None:
         print("\t".join(["variant", *METRIC_LABELS]))
         for v, st in variant_stats.items():
             print("\t".join([v, *(fmt(st["mean_metrics_delta"][k], 3) for k in METRIC_LABELS)]))
+
+    if any(st["judge_same_family_rate"] for st in variant_stats.values()):
+        print(f"\n## Judge（{', '.join(sorted({j for j in judges.values() if j}))}）と同系統のモデルを使った Run の割合")
+        for v, st in variant_stats.items():
+            print(f"{v}\t{fmt(st['judge_same_family_rate'], 2)}")
+        print("  ※ 同系統の側を優位とした判定は人間レビューに回します。結論に使う前に別系統の Judge でも採点してください")
 
     print("\n## 方式どうしの比較（タスク単位の勝敗）")
     for c in comparisons:

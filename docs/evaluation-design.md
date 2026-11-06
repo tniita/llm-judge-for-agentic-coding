@@ -41,13 +41,14 @@
 - 同じタスクで、方式間の総合点（0〜100）の差が `--gap`（既定 5）未満
 - 機械的な指標の差分が閾値を超えて悪化した（[scripts/config.py](../scripts/config.py) の `METRIC_THRESHOLDS`。既定は ΔV > +15、重複行 > +20、モジュール間の依存 > +5 本、ΔPC > +0.05、ΔQ < −0.05。暫定値）
 - ペア比較で、A/B の順序を入れ替えると判定が逆転した（`run_pairwise.py` の出力）
+- Judge と同系統のモデル（OpenAI・Anthropic などの提供元が同じ）で生成した側を、相手が別系統なのに優位と判定した（絶対評価はタスク単位、ペア比較は組単位）。対応表に `agent_models`（`make_row.py --agent-models`）がある場合だけ判定する。別系統の側を優位とした判定は、バイアスがあっても結論が保守的になるため回さない
 
 ## 評価の信頼性を保つ仕組み
 
 | 仕組み | 内容 |
 |---|---|
 | 3 回採点して中央値 | 1 回だけ極端な点数が出ても影響しない |
-| Judge を別系統のモデルに | 評価対象が Claude 系なので Judge は GPT 系 |
+| Judge を別系統のモデルに | 評価対象が Claude 系なので Judge は GPT 系。モデルを内部で選ぶ方式は実際に使ったモデルを対応表に記録し（`--agent-models`）、系統が Judge と重なる割合を `aggregate.py` が出す。重なる場合は、別系統の Judge（例: `JUDGE_DEPLOYMENT=grok-4.7 JUDGE_MODEL_VERSION=1`）でカナリアを確認してから採点し直し、結論が変わらないかを確かめる。Foundry の評価器は Claude のデプロイを Judge に使えない（`api_not_supported`） |
 | ブラインド化 | モデル名・方式名・会話ログは Judge に渡さない。対応表は集計時だけ使う |
 | A/B 入れ替え | ペア比較の位置バイアスを打ち消し、位置バイアスの大きさも出力する |
 | Judge バージョン固定 | 想定と違うモデルバージョンなら実行を止める。意図した更新なら `JUDGE_MODEL_VERSION` を更新するか `ALLOW_JUDGE_VERSION_CHANGE=1` |
